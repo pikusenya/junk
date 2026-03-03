@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Редактор Плана Здания</title>
+    <style>
+        body { 
+            margin: 0; 
+            font-family: sans-serif; 
+            display: flex; 
+            height: 100vh; 
+            overflow: hidden; 
+        }
+        
+        /* Левая часть - Холст (75%) */
+        #editor-container {
+            flex: 3;
+            position: relative;
+            background: #f0f0f0;
+            overflow: hidden;
+            cursor: grab;
+        }
+        #editor-container:active { 
+            cursor: grabbing; 
+        }
+
+        /* Мир внутри контейнера (двигается и зумится) */
+        #world {
+            transform-origin: 0 0;
+            position: absolute;
+            top: 0; 
+            left: 0;
+        }
+
+        /* Картинка */
+        #plan-image {
+            display: block;
+            user-select: none;
+        }
+
+        /* Точки как отдельные элементы */
+        .point-marker {
+            position: absolute;
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: #ff0000;
+            border: 2px solid #ffffff;
+            transform: translate(-50%, -50%);
+            cursor: move;
+            user-select: none;
+            pointer-events: auto;
+        }
+        .point-marker:hover {
+            background: #ffcc00;
+            transform: translate(-50%, -50%) scale(1.2);
+            z-index: 100;
+        }
+        .point-marker.dragging {
+            background: #ffcc00;
+            transform: translate(-50%, -50%) scale(1.3);
+        }
+        .point-marker.selected {
+            background: #00ff00;
+            border-color: #000000;
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.7);
+            z-index: 200;
+        }
+
+        .point-label {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: bold;
+            color: #000;
+            white-space: nowrap;
+            pointer-events: none;
+            transform: translate(10px, -25px);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+
+        /* Панель управления */
+        .controls {
+            position: absolute;
+            bottom: 20px; 
+            left: 20px;
+            background: rgba(255,255,255,0.8);
+            padding: 10px;
+            border-radius: 5px;
+            pointer-events: none;
+        }
+        .controls > * { 
+            pointer-events: auto; 
+        }
+
+        /* Правая панель (25%) */
+        #sidebar {
+            flex: 1;
+            background: #fff;
+            border-left: 1px solid #ccc;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            box-shadow: -2px 0 5px rgba(0,0,0,0.1);
+        }
+
+        button {
+            padding: 10px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button.active { background: #28a745; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+
+        #data-output {
+            flex: 1;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            overflow-y: auto;
+            resize: none; /* Запрещаем изменять размер */
+        }
+
+
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none; /* По умолчанию не ловим клики на самом SVG */
+        }
+
+        svg * {
+            pointer-events: auto; /* Но ловим на элементах внутри */
+        }
+
+        .polygon-fill {
+            fill-opacity: 0.2;
+            stroke-width: 2;
+        }
+
+        .vertex-circle {
+            cursor: move;
+            stroke-width: 2;
+        }
+
+        .base-point {
+            cursor: move;
+            stroke-width: 2;
+        }
+        .base-point:hover {
+            r: 10;
+            stroke-width: 3;
+        }
+        .base-point.selected {
+            stroke: #000000;
+            stroke-width: 3;
+            filter: drop-shadow(0 0 5px rgba(0, 255, 0, 0.7));
+        }
+
+
+        button#btn-delete-point {
+            background: #dc3545;
+        }
+        button#btn-delete-point:hover {
+            background: #c82333;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Область редактора (75%) -->
+    <div id="editor-container">
+        <div id="world">
+            <img id="plan-image" src="/media/BuildingPlan.jpg" alt="Plan">
+            <svg id="drawing-svg"></svg>
+        </div>
+        
+        
+        <div class="controls">
+            <div>Масштаб: <span id="zoom-level">100</span>%</div>
+            <div style="margin-top: 5px;">
+                <label for="zoom-slider">Зум: </label>
+                <input type="range" id="zoom-slider" min="10" max="500" value="100" style="width: 100px;">
+            </div>
+            <div style="font-size: 0.8em; color: #555; margin-top: 5px;">Колесо - Зум | СКМ + Драг - Перемещение | ЛКМ - Точка/Переместить точку</div>
+        </div>
+    </div>
+
+    <!-- Панель управления (25%) -->
+    <div id="sidebar">
+        <h3>Инструменты</h3>
+        <button id="btn-add-mode">Режим: Разметка</button>
+        <button id="btn-delete-point" disabled>Удалить точку</button>
+        <button id="btn-add-polygon" disabled>Добавить полигон к точке</button>
+        <button id="btn-clear">Очистить всё</button>
+        <button id="btn-apply">Применить данные</button>
+        
+        <h4>Данные (JSON)</h4>
+        <textarea id="data-output" rows="10">[]</textarea>
+    </div>
+
+<script>
+    // --- КОНФИГУРАЦИЯ ---
+    const container = document.getElementById('editor-container');
+    const world = document.getElementById('world');
+    const img = document.getElementById('plan-image');
+    const zoomLevelSpan = document.getElementById('zoom-level');
+    const zoomSlider = document.getElementById('zoom-slider');
+    const btnAddMode = document.getElementById('btn-add-mode');
+    const btnClear = document.getElementById('btn-clear');
+    const btnApply = document.getElementById('btn-apply');
+    const btnAddPolygon = document.getElementById('btn-add-polygon');
+    const btnDeletePoint = document.getElementById('btn-delete-point');
+    const output = document.getElementById('data-output');
+    
+    // Состояние приложения
+    let state = {
+        scale: 1,
+        panX: 0,
+        panY: 0,
+        isPanning: false,
+        startPanX: 0,
+        startPanY: 0,
+        startMouseX: 0,
+        startMouseY: 0,
+        isDrawing: false,
+        points: [], // Теперь сюда входят и базовые точки, и вершины
+        draggingPoint: null,
+        isManualEditing: false,
+        selectedPoint: null
+    };
+
+    // --- ИНИЦИАЛИЗАЦИЯ ---
+    // Добавить после загрузки изображения
+    img.onload = () => {
+        updateTransform();
+        renderSVG();
+        
+        // Обработчик клика на элементы внутри SVG
+        const svg = document.getElementById('drawing-svg');
+    };
+
+    // --- УПРАВЛЕНИЕ ТРАНСФОРМАЦИЕЙ (ЗУМ/ПАН) ---
+    function updateTransform() {
+        world.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.scale})`;
+        zoomLevelSpan.textContent = Math.round(state.scale * 100);
+        zoomSlider.value = Math.round(state.scale * 100);
+    }
+
+    // Зум колесиком ОТ КУРСОРА
+    container.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        
+        const rect = container.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        const imageXBefore = (mouseX - state.panX) / state.scale;
+        const imageYBefore = (mouseY - state.panY) / state.scale;
+        
+        const zoomIntensity = 0.1;
+        const delta = e.deltaY > 0 ? -zoomIntensity : zoomIntensity;
+        const newScale = Math.min(Math.max(0.1, state.scale + delta), 5);
+        
+        const imageXAfter = (mouseX - state.panX) / newScale;
+        const imageYAfter = (mouseY - state.panY) / newScale;
+        
+        const deltaX = (imageXAfter - imageXBefore) * newScale;
+        const deltaY = (imageYAfter - imageYBefore) * newScale;
+        
+        state.scale = newScale;
+        state.panX += deltaX;
+        state.panY += deltaY;
+        
+        updateTransform();
+    });
+
+    // Слайдер зума
+    zoomSlider.addEventListener('input', (e) => {
+        const newScale = parseFloat(e.target.value) / 100;
+        state.scale = newScale;
+        updateTransform();
+    });
+
+    // Обработчик фокуса на поле данных
+    output.addEventListener('focus', () => {
+        state.isManualEditing = true;
+    });
+
+    output.addEventListener('blur', () => {
+        state.isManualEditing = false;
+    });
+
+    // Универсальный обработчик кликов
+    container.addEventListener('mousedown', (e) => {
+        // Колесико мыши - панорамирование
+        if (e.button === 1) {
+            e.preventDefault();
+            state.isPanning = true;
+            state.startPanX = state.panX;
+            state.startPanY = state.panY;
+            state.startMouseX = e.clientX;
+            state.startMouseY = e.clientY;
+            container.style.cursor = 'grabbing';
+            return;
+        }
+        
+        // ЛКМ в режиме редактирования
+        if (state.isDrawing && e.button === 0) {
+            e.preventDefault();
+            
+            const target = e.target;
+            
+            // Клик по базовой точке
+            if (target.classList && target.classList.contains('base-point')) {
+                const pointId = parseInt(target.dataset.pointId);
+                const point = state.points.find(p => p.id === pointId);
+                
+                if (point) {
+                    handleBasePointClick(point, target);
+                }
+                return;
+            }
+            
+            // Клик по вершине полигона
+            if (target.classList && target.classList.contains('vertex-circle')) {
+                const vertexId = parseInt(target.dataset.vertexId);
+                const vertex = state.points.find(p => p.id === vertexId);
+                
+                if (vertex) {
+                    handleVertexClick(vertex);
+                }
+                return;
+            }
+            
+            // Клик по полигону
+            if (target.classList && target.classList.contains('polygon-fill')) {
+                const basePointId = parseInt(target.dataset.basePointId);
+                const basePoint = state.points.find(p => p.id === basePointId);
+                
+                if (basePoint) {
+                    handlePolygonClick(basePoint);
+                }
+                return;
+            }
+            
+            // Клик по пустому месту - создаем новую точку
+            handleEmptySpaceClick(e);
+        }
+    });
+
+    function handleBasePointClick(point, circleElement) {
+        // Выбираем точку
+        state.selectedPoint = point;
+        btnAddPolygon.disabled = state.points.some(p => p.attachedTo === point.id);
+        btnDeletePoint.disabled = false; // Включаем кнопку удаления
+        
+        // Убираем класс у всех точек
+        document.querySelectorAll('.base-point').forEach(c => {
+            c.classList.remove('selected');
+        });
+        
+        // Добавляем класс выбранной
+        circleElement.classList.add('selected');
+        
+        state.draggingPoint = point;
+        container.style.cursor = 'move';
+        
+        updateDataOutput();
+    }
+
+    function handleVertexClick(vertex) {
+        // Выбираем базовую точку к которой привязана вершина
+        const basePoint = state.points.find(p => p.id === vertex.attachedTo);
+        if (basePoint) {
+            state.selectedPoint = basePoint;
+            btnAddPolygon.disabled = true; // Нельзя добавить полигон к вершине
+        }
+        
+        // Убираем класс у всех точек
+        document.querySelectorAll('.base-point').forEach(c => {
+            c.classList.remove('selected');
+        });
+        
+        state.draggingPoint = vertex;
+        container.style.cursor = 'move';
+        
+        updateDataOutput();
+    }
+
+    function handlePolygonClick(basePoint) {
+        state.selectedPoint = basePoint;
+        btnAddPolygon.disabled = true; // Уже есть полигон
+        btnDeletePoint.disabled = false; // Включаем кнопку удаления
+        
+        // Убираем класс у всех точек
+        document.querySelectorAll('.base-point').forEach(c => {
+            c.classList.remove('selected');
+        });
+        
+        // Находим круг базовой точки и добавляем класс
+        const circle = document.querySelector(`.base-point[data-point-id="${basePoint.id}"]`);
+        if (circle) {
+            circle.classList.add('selected');
+        }
+        
+        state.draggingPoint = basePoint;
+        container.style.cursor = 'move';
+        
+        updateDataOutput();
+    }
+
+    function handleEmptySpaceClick(e) {
+        const coords = getSVGCoordinates(e.clientX, e.clientY);
+        
+        // Проверяем, кликнули ли мы по существующей точке (через координаты)
+        const clickedPoint = findPointAt(coords.x, coords.y);
+        
+        if (!clickedPoint) {
+            // Создаем новую точку
+            const newPoint = {
+                id: Date.now(),
+                x: coords.x,
+                y: coords.y
+            };
+            state.points.push(newPoint);
+            renderSVG();
+            updateDataOutput();
+        }
+    }
+
+    window.addEventListener('mousemove', (e) => {
+        if (state.isPanning) {
+            const dx = e.clientX - state.startMouseX;
+            const dy = e.clientY - state.startMouseY;
+            state.panX = state.startPanX + dx;
+            state.panY = state.startPanY + dy;
+            updateTransform();
+            renderSVG();
+        } else if (state.draggingPoint) {
+            const coords = getSVGCoordinates(e.clientX, e.clientY);
+            
+            // Сохраняем старые координаты
+            const oldX = state.draggingPoint.x;
+            const oldY = state.draggingPoint.y;
+            
+            // Обновляем координаты точки
+            state.draggingPoint.x = coords.x;
+            state.draggingPoint.y = coords.y;
+            
+            // Если это базовая точка с полигоном
+            if (!state.draggingPoint.isPolygonVertex) {
+                const vertices = state.points.filter(p => 
+                    p.attachedTo === state.draggingPoint.id
+                );
+                
+                // Перемещаем все вершины вместе с базовой точкой
+                const deltaX = coords.x - oldX;
+                const deltaY = coords.y - oldY;
+                
+                vertices.forEach(vertex => {
+                    vertex.x += deltaX;
+                    vertex.y += deltaY;
+                });
+            }
+            
+            renderSVG();
+            updateDataOutput();
+        } else if (state.isDrawing) {
+            // Проверяем, наведен ли курсор на точку
+            const coords = getSVGCoordinates(e.clientX, e.clientY);
+            const hoveredPoint = findPointAt(coords.x, coords.y);
+            container.style.cursor = hoveredPoint ? 'move' : 'crosshair';
+        }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+        if (state.isPanning) {
+            state.isPanning = false;
+            container.style.cursor = state.isDrawing ? 'crosshair' : 'grab';
+        }
+        if (state.draggingPoint) {
+            state.draggingPoint = null;
+            container.style.cursor = 'crosshair';
+        }
+    });
+
+    window.addEventListener('blur', () => {
+        state.isPanning = false;
+        state.draggingPoint = null;
+        container.style.cursor = state.isDrawing ? 'crosshair' : 'grab';
+    });
+
+    // --- ЛОГИКА ТОЧЕК ---
+    function getSVGCoordinates(clientX, clientY) {
+        const rect = container.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        
+        const svgX = (x - state.panX) / state.scale;
+        const svgY = (y - state.panY) / state.scale;
+        
+        return { x: Math.round(svgX), y: Math.round(svgY) };
+    }
+
+    function handlePointClick(e) {
+        const coords = getSVGCoordinates(e.clientX, e.clientY);
+        
+        // Проверяем, кликнули ли мы по существующей точке
+        const clickedPoint = findPointAt(coords.x, coords.y);
+        
+        if (clickedPoint) {
+            // Выбираем точку
+            state.selectedPoint = clickedPoint;
+            btnAddPolygon.disabled = false;
+            
+            // Убираем класс у всех точек
+            document.querySelectorAll('.point-marker').forEach(m => {
+                m.classList.remove('dragging', 'selected');
+            });
+            
+            // Начинаем перетаскивание точки
+            state.draggingPoint = clickedPoint;
+            container.style.cursor = 'move';
+            
+            // Добавляем классы
+            const marker = document.querySelector(`.point-marker[data-id="${clickedPoint.id}"]`);
+            if (marker) {
+                marker.classList.add('dragging', 'selected');
+            }
+            
+            updateDataOutput();
+        } else {
+            // Создаем новую точку
+            const newPoint = {
+                id: Date.now(),
+                x: coords.x,
+                y: coords.y
+            };
+            state.points.push(newPoint);
+            renderSVG();
+            updateDataOutput();
+        }
+    }
+
+    function findPointAt(x, y) {
+        // Ищем точку в радиусе 15 пикселей
+        return state.points.find(point => {
+            // Пропускаем вершины полигонов - они обрабатываются отдельно
+            if (point.isPolygonVertex) return false;
+            
+            const dx = point.x - x;
+            const dy = point.y - y;
+            return Math.sqrt(dx * dx + dy * dy) < 15;
+        });
+    }
+
+    function renderSVG() {
+        const svg = document.getElementById('drawing-svg');
+        if (!svg) return;
+        
+        // Очищаем старое содержимое
+        svg.innerHTML = '';
+        
+        // Устанавливаем размеры SVG
+        svg.setAttribute('width', img.naturalWidth);
+        svg.setAttribute('height', img.naturalHeight);
+        
+        // Находим все базовые точки с полигонами
+        const basePointsWithPolygons = state.points.filter(p => 
+            !p.isPolygonVertex && 
+            state.points.some(v => v.attachedTo === p.id)
+        );
+        
+        // Находим базовые точки без полигонов
+        const basePointsWithoutPolygons = state.points.filter(p => 
+            !p.isPolygonVertex && 
+            !state.points.some(v => v.attachedTo === p.id)
+        );
+        
+        // Сначала рисуем полигоны (чтобы они были под точками)
+        basePointsWithPolygons.forEach(basePoint => {
+            const vertices = state.points.filter(p => p.attachedTo === basePoint.id);
+            
+            if (vertices.length === 4) {
+                // Берем цвет из первой вершины
+                const color = vertices[0].polygonColor || '#00ff00';
+                
+                // Создаем полигон
+                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                const pointsStr = vertices.map(v => `${v.x},${v.y}`).join(' ');
+                polygon.setAttribute('points', pointsStr);
+                polygon.setAttribute('class', 'polygon-fill');
+                polygon.setAttribute('fill', color);
+                polygon.setAttribute('stroke', color);
+                
+                // Добавляем данные для кликов
+                polygon.dataset.basePointId = basePoint.id;
+                
+                svg.appendChild(polygon);
+                
+                // Создаем вершины полигона
+                vertices.forEach(vertex => {
+                    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    circle.setAttribute('cx', vertex.x);
+                    circle.setAttribute('cy', vertex.y);
+                    circle.setAttribute('r', 6);
+                    circle.setAttribute('fill', '#0000ff');
+                    circle.setAttribute('stroke', '#ffffff');
+                    circle.setAttribute('class', 'vertex-circle');
+                    circle.dataset.vertexId = vertex.id;
+                    circle.dataset.attachedTo = vertex.attachedTo;
+                    
+                    svg.appendChild(circle);
+                });
+            }
+        });
+        
+        // Рисуем базовые точки без полигонов
+        basePointsWithoutPolygons.forEach(point => {
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', point.x);
+            circle.setAttribute('cy', point.y);
+            circle.setAttribute('r', 8);
+            circle.setAttribute('fill', '#ff0000');
+            circle.setAttribute('stroke', '#ffffff');
+            circle.setAttribute('class', 'base-point');
+            circle.dataset.pointId = point.id;
+            
+            // Выбранная точка
+            if (state.selectedPoint && state.selectedPoint.id === point.id) {
+                circle.classList.add('selected');
+            }
+            
+            // Текст с ID
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', point.x + 12);
+            text.setAttribute('y', point.y - 12);
+            text.setAttribute('font-family', 'Arial');
+            text.setAttribute('font-size', '12');
+            text.setAttribute('fill', '#000000');
+            text.textContent = point.id;
+            
+            svg.appendChild(circle);
+            svg.appendChild(text);
+        });
+        
+        // Рисуем базовые точки с полигонами (поверх полигонов)
+        basePointsWithPolygons.forEach(point => {
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', point.x);
+            circle.setAttribute('cy', point.y);
+            circle.setAttribute('r', 8);
+            circle.setAttribute('fill', '#ff0000');
+            circle.setAttribute('stroke', '#ffffff');
+            circle.setAttribute('class', 'base-point');
+            circle.dataset.pointId = point.id;
+            
+            // Выбранная точка
+            if (state.selectedPoint && state.selectedPoint.id === point.id) {
+                circle.classList.add('selected');
+            }
+            
+            // Текст с ID
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.setAttribute('x', point.x + 12);
+            text.setAttribute('y', point.y - 12);
+            text.setAttribute('font-family', 'Arial');
+            text.setAttribute('font-size', '12');
+            text.setAttribute('fill', '#000000');
+            text.textContent = point.id;
+            
+            svg.appendChild(circle);
+            svg.appendChild(text);
+        });
+    }
+
+    function updateDataOutput() {
+        if (!state.isManualEditing) {
+            // Фильтруем базовые точки
+            const basePoints = state.points.filter(p => !p.isPolygonVertex);
+            
+            // Собираем информацию о полигонах
+            const polygons = [];
+            basePoints.forEach(basePoint => {
+                const vertices = state.points.filter(p => p.attachedTo === basePoint.id);
+                if (vertices.length > 0) {
+                    const color = vertices[0].polygonColor || '#00ff00';
+                    polygons.push({
+                        attachedTo: basePoint.id,
+                        color: color,
+                        vertices: vertices.map(v => ({
+                            id: v.id,
+                            x: v.x,
+                            y: v.y
+                        }))
+                    });
+                }
+            });
+            
+            const data = {
+                points: basePoints,
+                polygons: polygons
+            };
+            
+            output.value = JSON.stringify(data, null, 2);
+        }
+    }
+
+    // --- КНОПКИ ---
+
+    btnAddMode.addEventListener('click', () => {
+        state.isDrawing = !state.isDrawing;
+        btnAddMode.classList.toggle('active');
+        btnAddMode.textContent = state.isDrawing ? "Режим: Разметка (ВКЛ)" : "Режим: Разметка";
+        container.style.cursor = state.isDrawing ? 'crosshair' : 'grab';
+        
+        if (!state.isDrawing) {
+            state.draggingPoint = null;
+            state.selectedPoint = null;
+            // Убираем классы выделения
+            document.querySelectorAll('.base-point').forEach(c => {
+                c.classList.remove('selected');
+            });
+            btnAddPolygon.disabled = true;
+            btnDeletePoint.disabled = true;
+        }
+    });
+
+    btnClear.addEventListener('click', () => {
+        if(confirm('Удалить все точки?')) {
+            state.points = [];
+            state.draggingPoint = null;
+            state.selectedPoint = null;
+            // Удаляем все точки и полигоны из DOM
+            document.querySelectorAll('.point-marker').forEach(p => p.remove());
+            document.querySelectorAll('.polygon-overlay').forEach(p => p.remove());
+            updateDataOutput();
+        }
+    });
+
+    btnApply.addEventListener('click', () => {
+        try {
+            const data = JSON.parse(output.value);
+            
+            // Валидация данных
+            if (typeof data !== 'object' || !data.points) {
+                throw new Error('Неверный формат данных. Ожидается {points: [...], polygons: [...]}');
+            }
+            
+            if (!Array.isArray(data.points)) {
+                throw new Error('points должны быть массивом');
+            }
+            
+            // Проверяем структуру каждой точки
+            data.points.forEach(point => {
+                if (typeof point.id === 'undefined' || typeof point.x === 'undefined' || typeof point.y === 'undefined') {
+                    throw new Error('Неверный формат точки. Ожидается {id, x, y}');
+                }
+            });
+            
+            // Применяем базовые точки
+            state.points = [...data.points];
+            
+            // Применяем полигоны если есть
+            if (data.polygons && Array.isArray(data.polygons)) {
+                data.polygons.forEach(poly => {
+                    if (!poly.attachedTo || !poly.vertices || !Array.isArray(poly.vertices)) {
+                        throw new Error('Неверный формат полигона');
+                    }
+                    
+                    // Проверяем что базовая точка существует
+                    const basePointExists = state.points.some(p => p.id == poly.attachedTo);
+                    if (!basePointExists) {
+                        console.warn(`Базовая точка ${poly.attachedTo} не найдена, полигон пропущен`);
+                        return;
+                    }
+                    
+                    // Добавляем вершины
+                    const color = poly.color || '#00ff00';
+                    poly.vertices.forEach(vertex => {
+                        state.points.push({
+                            id: vertex.id,
+                            x: vertex.x,
+                            y: vertex.y,
+                            isPolygonVertex: true,
+                            attachedTo: poly.attachedTo,
+                            polygonColor: color
+                        });
+                    });
+                });
+            }
+            
+            state.selectedPoint = null;
+            state.draggingPoint = null;
+            
+            renderSVG();
+            alert('Данные успешно применены!');
+            
+        } catch (error) {
+            alert(`Ошибка при применении данных:\n${error.message}`);
+            console.error(error);
+        }
+    });
+
+    btnAddPolygon.addEventListener('click', () => {
+        if (!state.selectedPoint) {
+            alert('Сначала выберите точку!');
+            return;
+        }
+        
+        // Проверяем, есть ли уже полигон у этой точки
+        const existingVertices = state.points.filter(p => 
+            p.attachedTo === state.selectedPoint.id
+        );
+        
+        if (existingVertices.length > 0) {
+            alert('У этой точки уже есть полигон!');
+            return;
+        }
+        
+        const basePoint = state.selectedPoint;
+        const size = 10; // Радиус 10 пикселей
+        
+        // Генерируем случайный цвет для полигона
+        const color = '#' + Math.floor(Math.random()*16777215).toString(16);
+        
+        // Создаем 4 вершины вокруг выбранной точки
+        const vertices = [
+            { id: Date.now() + 1, x: basePoint.x - size, y: basePoint.y - size, isPolygonVertex: true, attachedTo: basePoint.id, polygonColor: color },
+            { id: Date.now() + 2, x: basePoint.x + size, y: basePoint.y - size, isPolygonVertex: true, attachedTo: basePoint.id, polygonColor: color },
+            { id: Date.now() + 3, x: basePoint.x + size, y: basePoint.y + size, isPolygonVertex: true, attachedTo: basePoint.id, polygonColor: color },
+            { id: Date.now() + 4, x: basePoint.x - size, y: basePoint.y + size, isPolygonVertex: true, attachedTo: basePoint.id, polygonColor: color }
+        ];
+        
+        // Добавляем вершины в точки
+        state.points.push(...vertices);
+        
+        renderSVG();
+        updateDataOutput();
+    });
+
+    btnDeletePoint.addEventListener('click', () => {
+        if (!state.selectedPoint) {
+            alert('Сначала выберите точку для удаления!');
+            return;
+        }
+        
+        const pointId = state.selectedPoint.id;
+        
+        if (confirm(`Удалить точку ${pointId} и связанный с ней полигон?`)) {
+            // Удаляем базовую точку
+            state.points = state.points.filter(p => p.id !== pointId);
+            
+            // Удаляем все вершины полигона, привязанные к этой точке
+            state.points = state.points.filter(p => p.attachedTo !== pointId);
+            
+            // Сбрасываем выбранную точку
+            state.selectedPoint = null;
+            state.draggingPoint = null;
+            btnAddPolygon.disabled = true;
+            btnDeletePoint.disabled = true;
+            
+            // Убираем классы выделения
+            document.querySelectorAll('.base-point').forEach(c => {
+                c.classList.remove('selected');
+            });
+            
+            renderSVG();
+            updateDataOutput();
+        }
+    });
+
+</script>
+</body>
+</html>
