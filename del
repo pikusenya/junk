@@ -1,416 +1,318 @@
-% extends "admin/change_form.html" %}
-{% load static %}
-
-{% block extrastyle %}
-    {{ block.super }}
-    <link rel="stylesheet" href="{% static 'automation/css/admin-custom.css' %}">
-{% endblock %}
-
-{% block extrahead %}
-    {{ block.super }}
-    <script src="{% static 'automation/js/rule_form.js' %}"></script>
-{% endblock %}
-
-{% block content %}
-    <div class="automation-layout">
-        <!-- Левая часть: Основная форма -->
-        <div class="automation-main-form">
-            {{ block.super }}
-        </div>
+<!-- Модальное окно привязки точки -->
+<div id="point-subcard-modal" class="modal hidden">
+    <div class="modal-content">
+        <h3>Привязать точку к субкарте</h3>
         
-        <!-- Правая часть: Панель помощи -->
-        <div class="automation-sidebar">
-            <!-- Блок 1: Поля субкарты -->
-            <div class="sidebar-block">
-                <h3>📦 Поля субкарты</h3>
-                <div id="subcard-fields-container">
-                    <p class="help-text">Выберите модель выше, чтобы увидеть доступные поля субкарты</p>
-                </div>
-            </div>
-            
-            <!-- Блок 2: Генератор условия триггера -->
-            <div class="sidebar-block">
-                <h3>🎯 Условие триггера</h3>
-                <div id="trigger-generator">
-                    <p class="help-text">Заполните форму для автоматической генерации JSON</p>
-                </div>
-            </div>
-            
-            <!-- Блок 3: Настройки действия -->
-            <div class="sidebar-block">
-                <h3>⚙️ Настройки действия</h3>
-                <div id="action-generator">
-                    <p class="help-text">Выберите тип действия для настройки</p>
-                </div>
-            </div>
-        </div>
-    </div>
-{% endblock %}
-
-
-
-/* Основной контейнер */
-.automation-layout {
-    display: flex;
-    gap: 20px;
-    max-width: 100%;
-}
-
-/* Левая часть - форма */
-.automation-main-form {
-    flex: 1;
-    min-width: min-content;
-    max-width: 60%;
-}
-
-#automationrule_form {
-    width: min-content;
-    min-width: 500px;
-}
-
-/* Правая часть - сайдбар */
-.automation-sidebar {
-    flex: 0 0 350px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-}
-
-/* Блоки в сайдбаре */
-.sidebar-block {
-    background: #f8f9fa;
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    padding: 15px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
-
-.sidebar-block h3 {
-    margin-top: 0;
-    margin-bottom: 15px;
-    color: #333;
-    font-size: 14px;
-    border-bottom: 2px solid #007bff;
-    padding-bottom: 8px;
-}
-
-/* Элементы форм в сайдбаре */
-.sidebar-block label {
-    display: block;
-    margin-bottom: 5px;
-    font-weight: bold;
-    font-size: 12px;
-    color: #555;
-}
-
-.sidebar-block input,
-.sidebar-block select,
-.sidebar-block textarea {
-    width: 100%;
-    margin-bottom: 10px;
-    padding: 8px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    font-size: 13px;
-    box-sizing: border-box;
-}
-
-.sidebar-block button {
-    background: #007bff;
-    color: white;
-    border: none;
-    padding: 8px 15px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    margin-top: 5px;
-}
-
-.sidebar-block button:hover {
-    background: #0056b3;
-}
-
-/* Скрытые поля Django */
-.sidebar-block .original-json-field {
-    display: none;
-}
-
-/* Подсказки */
-.help-text {
-    font-size: 11px;
-    color: #666;
-    font-style: italic;
-    margin-bottom: 10px;
-}
-
-/* Список полей */
-.field-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    max-height: 200px;
-    overflow-y: auto;
-}
-
-.field-list li {
-    padding: 5px 8px;
-    margin-bottom: 3px;
-    background: white;
-    border: 1px solid #eee;
-    border-radius: 3px;
-    font-size: 12px;
-    cursor: pointer;
-}
-
-.field-list li:hover {
-    background: #e9ecef;
-}
-
-/* Адаптив для маленьких экранов */
-@media (max-width: 1024px) {
-    .automation-layout {
-        flex-direction: column;
-    }
-    
-    .automation-main-form {
-        max-width: 100%;
-    }
-    
-    .automation-sidebar {
-        flex: 1;
-        width: 100%;
-    }
-}
-
-
-
-
-
-// =====================================================
-// ГЕНЕРАТОРЫ ФОРМ ДЛЯ JSON-ПОЛЕЙ
-// =====================================================
-
-document.addEventListener('DOMContentLoaded', function() {
-    initSubcardFieldsPanel();
-    initTriggerGenerator();
-    initActionGenerator();
-});
-
-// --- 1. Панель полей субкарты ---
-
-function initSubcardFieldsPanel() {
-    const contentTypeField = document.querySelector('[name="content_type"]');
-    const container = document.getElementById('subcard-fields-container');
-    
-    if (!contentTypeField || !container) return;
-    
-    contentTypeField.addEventListener('change', function() {
-        loadSubcardFields(this.value, container);
-    });
-    
-    // Загрузить при инициализации, если модель уже выбрана
-    if (contentTypeField.value) {
-        loadSubcardFields(contentTypeField.value, container);
-    }
-}
-
-function loadSubcardFields(contentTypeId, container) {
-    if (!contentTypeId) {
-        container.innerHTML = '<p class="help-text">Модель не выбрана</p>';
-        return;
-    }
-    
-    container.innerHTML = '<p class="help-text">Загрузка...</p>';
-    
-    fetch(`/automation/api/get-model-relations/?content_type_id=${contentTypeId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.has_subcard_relation && data.relations.length > 0) {
-                // Загружаем поля первой найденной субкарты
-                const relationPath = data.relations[0].path;
-                loadSubcardFieldList(relationPath, container);
-            } else {
-                container.innerHTML = '<p class="help-text">⚠️ Связь с субкартой не найдена</p>';
-            }
-        })
-        .catch(error => {
-            container.innerHTML = '<p class="help-text">❌ Ошибка загрузки</p>';
-            console.error('Error:', error);
-        });
-}
-
-function loadSubcardFieldList(relationPath, container) {
-    // Нужно создать API endpoint для получения полей субкарты
-    // Или использовать существующий get-model-fields с ID модели субкарты
-    container.innerHTML = '<p class="help-text">📦 Поля будут доступны после выбора связи</p>';
-    // TODO: Реализовать загрузку полей субкарты
-}
-
-// --- 2. Генератор условия триггера ---
-
-function initTriggerGenerator() {
-    const container = document.getElementById('trigger-generator');
-    const jsonField = document.querySelector('[name="trigger_condition"]');
-    
-    if (!container || !jsonField) return;
-    
-    // Слушаем изменения JSON-поля (если пользователь редактирует вручную)
-    jsonField.addEventListener('input', function() {
-        syncTriggerFormToJSON(jsonField.value);
-    });
-    
-    // Инициализируем форму
-    renderTriggerForm(container, jsonField);
-}
-
-function renderTriggerForm(container, jsonField) {
-    let condition = {};
-    try {
-        condition = JSON.parse(jsonField.value || '{}');
-    } catch (e) {
-        condition = {};
-    }
-    
-    container.innerHTML = `
-        <label>Тип триггера</label>
-        <select id="trigger-type-select">
-            <option value="field_change" ${condition.type === 'field_change' ? 'selected' : ''}>Изменение поля</option>
-            <option value="schedule" ${condition.type === 'schedule' ? 'selected' : ''}>По расписанию</option>
+        <select id="subcard-select">
+            <option value="">-- Не привязано --</option>
+            <!-- Заполняется из всех субкарт объекта -->
+            {% for subcard in object.subcards.all %}
+            <option value="{{ subcard.id }}">{{ subcard.name }}</option>
+            {% endfor %}
         </select>
         
-        <label>Поле для отслеживания</label>
-        <input type="text" id="trigger-field-input" value="${condition.field || ''}" placeholder="Например: status">
+        <div class="current-assignment">
+            <p>Текущая привязка: <span id="current-subcard-name">-</span></p>
+        </div>
         
-        <label>Связь с субкартой (опционально)</label>
-        <input type="text" id="trigger-relation-input" value="${condition.relation || ''}" placeholder="Например: subcard">
-        
-        <label>Проверяемое поле в субкарте</label>
-        <input type="text" id="trigger-check-field-input" value="${condition.check_field || ''}" placeholder="Например: department">
-        
-        <label>Ожидаемое значение</label>
-        <input type="text" id="trigger-check-value-input" value="${condition.check_value || ''}" placeholder="Например: sales">
-        
-        <button type="button" id="trigger-apply-btn">Применить в JSON</button>
-        <p class="help-text">Нажмите "Применить" для обновления JSON-поля</p>
-    `;
-    
-    // Обработчик кнопки
-    document.getElementById('trigger-apply-btn').addEventListener('click', function() {
-        const newCondition = {
-            type: document.getElementById('trigger-type-select').value,
-            field: document.getElementById('trigger-field-input').value || undefined,
-            relation: document.getElementById('trigger-relation-input').value || undefined,
-            check_field: document.getElementById('trigger-check-field-input').value || undefined,
-            check_value: document.getElementById('trigger-check-value-input').value || undefined,
-        };
-        
-        // Удаляем undefined поля
-        Object.keys(newCondition).forEach(key => {
-            if (newCondition[key] === undefined) delete newCondition[key];
-        });
-        
-        jsonField.value = JSON.stringify(newCondition, null, 2);
-        
-        // Визуальное подтверждение
-        this.textContent = '✅ Применено!';
-        setTimeout(() => { this.textContent = 'Применить в JSON'; }, 1500);
-    });
-}
+        <button id="btn-save-point-assignment">Сохранить</button>
+        <button id="btn-close-point-modal">Отмена</button>
+    </div>
+</div>
 
-function syncTriggerFormToJSON(jsonValue) {
-    // Если нужно синхронизировать форму при ручном изменении JSON
-    // Пока оставляем одностороннюю синхронизацию (форма → JSON)
-}
 
-// --- 3. Генератор настроек действия ---
-
-function initActionGenerator() {
-    const container = document.getElementById('action-generator');
-    const jsonField = document.querySelector('[name="action_config"]');
-    const actionTypeField = document.querySelector('[name="action_type"]');
+/ Controller.js
+window.EditorController = {
+    elements: {},
+    selectedPoint: null,
     
-    if (!container || !jsonField || !actionTypeField) return;
-    
-    // Слушаем изменения типа действия
-    actionTypeField.addEventListener('change', function() {
-        renderActionForm(container, jsonField, this.value);
-    });
-    
-    // Инициализируем форму
-    renderActionForm(container, jsonField, actionTypeField.value);
-}
-
-function renderActionForm(container, jsonField, actionType) {
-    let config = {};
-    try {
-        config = JSON.parse(jsonField.value || '{}');
-    } catch (e) {
-        config = {};
-    }
-    
-    let formHTML = '';
-    
-    if (actionType === 'print') {
-        formHTML = `
-            <label>Сообщение</label>
-            <input type="text" id="action-message-input" value="${config.message || ''}" placeholder="Текст сообщения">
-            <p class="help-text">Доступные переменные: {field}, {old_value}, {new_value}</p>
-        `;
-    } else if (actionType === 'email') {
-        formHTML = `
-            <label>Тема письма</label>
-            <input type="text" id="action-subject-input" value="${config.subject || ''}" placeholder="Тема">
-            
-            <label>Шаблон сообщения</label>
-            <textarea id="action-template-input" rows="3" placeholder="Текст письма">${config.template || ''}</textarea>
-        `;
-    } else if (actionType === 'webhook') {
-        formHTML = `
-            <label>URL</label>
-            <input type="url" id="action-url-input" value="${config.url || ''}" placeholder="https://...">
-            
-            <label>Метод</label>
-            <select id="action-method-select">
-                <option value="POST" ${config.method === 'POST' ? 'selected' : ''}>POST</option>
-                <option value="GET" ${config.method === 'GET' ? 'selected' : ''}>GET</option>
-            </select>
-        `;
-    } else if (actionType === 'update_field') {
-        formHTML = `
-            <label>Поле для обновления</label>
-            <input type="text" id="action-field-input" value="${config.field || ''}" placeholder="field_name">
-            
-            <label>Шаблон нового значения</label>
-            <input type="text" id="action-value-template-input" value="${config.value_template || ''}" placeholder="{new_value} [UPDATED]">
-        `;
-    } else {
-        formHTML = '<p class="help-text">Настройки для этого типа действия пока не реализованы</p>';
-    }
-    
-    formHTML += `<button type="button" id="action-apply-btn">Применить в JSON</button>`;
-    
-    container.innerHTML = formHTML;
-    
-    // Обработчик кнопки
-    document.getElementById('action-apply-btn')?.addEventListener('click', function() {
-        const newConfig = {};
+    init() {
+        // ... существующие слушатели ...
         
-        if (actionType === 'print') {
-            newConfig.message = document.getElementById('action-message-input').value;
-        } else if (actionType === 'email') {
-            newConfig.subject = document.getElementById('action-subject-input').value;
-            newConfig.template = document.getElementById('action-template-input').value;
-        } else if (actionType === 'webhook') {
-            newConfig.url = document.getElementById('action-url-input').value;
-            newConfig.method = document.getElementById('action-method-select').value;
-        } else if (actionType === 'update_field') {
-            newConfig.field = document.getElementById('action-field-input').value;
-            newConfig.value_template = document.getElementById('action-value-template-input').value;
+        // Клик по точке → открываем модальное окно
+        document.getElementById('drawing-svg')
+            .addEventListener('click', (e) => {
+                if (e.target.classList.contains('base-point')) {
+                    const pointId = parseInt(e.target.dataset.pointId);
+                    this.openPointSubcardModal(pointId);
+                }
+            });
+        
+        // Сохранение привязки
+        document.getElementById('btn-save-point-assignment')
+            .addEventListener('click', () => this.savePointAssignment());
+        
+        // Закрытие модального окна
+        document.getElementById('btn-close-point-modal')
+            .addEventListener('click', () => this.closePointModal());
+    },
+    
+    async openPointSubcardModal(pointId) {
+        const point = EditorModel.getPoint(pointId);
+        this.selectedPoint = point;
+        
+        const { modal, select, currentName } = this.elements;
+        
+        // Заполняем селектор
+        this.populateSubcardSelect(point.subcardId);
+        
+        // Показываем текущую привязку
+        if (point.subcardId) {
+            const subcard = EditorModel.getSubcard(point.subcardId);
+            currentName.textContent = subcard ? subcard.name : 'Неизвестно';
+        } else {
+            currentName.textContent = 'Не привязано';
         }
         
-        jsonField.value = JSON.stringify(newConfig, null, 2);
+        modal.classList.remove('hidden');
+    },
+    
+    populateSubcardSelect(selectedId) {
+        const { select } = this.elements;
+        select.innerHTML = '<option value="">-- Не привязано --</option>';
         
-        this.textContent = '✅ Применено!';
-        setTimeout(() => { this.textContent = 'Применить в JSON'; }, 1500);
+        EditorModel.subcards.forEach(subcard => {
+            const option = document.createElement('option');
+            option.value = subcard.id;
+            option.textContent = subcard.name;
+            if (subcard.id === selectedId) {
+                option.selected = true;
+            }
+            select.appendChild(option);
+        });
+    },
+    
+    savePointAssignment() {
+        const { select } = this.elements;
+        const subcardId = select.value ? parseInt(select.value) : null;
+        
+        if (this.selectedPoint) {
+            // Обновляем subcardId у точки
+            this.selectedPoint.subcardId = subcardId;
+            
+            // Если у точки есть полигон — обновляем и его
+            if (this.selectedPoint.polygon) {
+                this.selectedPoint.polygon.subcardId = subcardId;
+            }
+            
+            // Перерисовываем (чтобы обновить цвет точки)
+            EditorView.render();
+            
+            this.closePointModal();
+        }
+    },
+    
+    closePointModal() {
+        this.elements.modal.classList.add('hidden');
+        this.selectedPoint = null;
+    },
+    
+    // --- СОХРАНЕНИЕ ВСЕХ ДАННЫХ ---
+    async saveFloorPlan() {
+        const floorId = this.currentFloorId;
+        
+        // Группируем точки по subcardId
+        const pointsBySubcard = this.groupPointsBySubcard();
+        
+        // Формируем обновления для каждой субкарты
+        const subcardsUpdates = Object.entries(pointsBySubcard).map(([subcardId, data]) => ({
+            subcard_id: parseInt(subcardId),
+            coords: {
+                points: data.points,
+                polygons: data.polygons
+            },
+            add_to_floorplan: true  // Если есть точки → привязываем субкарту к этажу
+        }));
+        
+        // Находим субкарты, которые были привязаны, но теперь без точек → отвязываем
+        const previouslyLinked = EditorModel.linkedSubcardIds;
+        const currentlyLinked = Object.keys(pointsBySubcard).map(id => parseInt(id));
+        
+        previouslyLinked.forEach(id => {
+            if (!currentlyLinked.includes(id)) {
+                subcardsUpdates.push({
+                    subcard_id: id,
+                    remove_from_floorplan: true
+                });
+            }
+        });
+        
+        const formData = new FormData();
+        formData.append('subcards_updates', JSON.stringify(subcardsUpdates));
+        
+        const response = await fetch(`/api/floorplans/${floorId}/update/`, {
+            method: 'PATCH',
+            body: formData,
+            headers: {
+                'X-CSRFToken': getCookie('csrftoken'),
+                'Accept': 'application/json'
+            }
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+            alert('Данные сохранены!');
+            EditorModel.linkedSubcardIds = currentlyLinked;
+        } else {
+            alert('Ошибка: ' + result.error);
+        }
+    },
+    
+    groupPointsBySubcard() {
+        const grouped = {};
+        
+        EditorModel.points.forEach(point => {
+            const subcardId = point.subcardId || 'unassigned';
+            
+            if (!grouped[subcardId]) {
+                grouped[subcardId] = { points: [], polygons: [] };
+            }
+            
+            // Добавляем точку (без subcardId, так как он уже в ключе)
+            grouped[subcardId].points.push({
+                id: point.id,
+                x: point.x,
+                y: point.y
+            });
+            
+            // Добавляем полигон если есть
+            if (point.polygon) {
+                grouped[subcardId].polygons.push({
+                    attachedTo: point.id,
+                    color: point.polygon.color,
+                    vertices: point.polygon.vertices.map(v => ({
+                        id: v.id,
+                        x: v.x,
+                        y: v.y
+                    }))
+                });
+            }
+        });
+        
+        // Убираем непривязанные точки (не отправляем на сервер)
+        delete grouped['unassigned'];
+        
+        return grouped;
+    }
+};
+
+
+# views.py
+@api_view(['PUT', 'PATCH'])
+def update_floorplan(request, floorplan_id):
+    floor_plan = get_object_or_404(FloorPlan, id=floorplan_id)
+    
+    updated_data = request.data
+    serializer = FloorPlanSerializer(floor_plan, data=updated_data, partial=True)
+    
+    failed_subcards = []
+    
+    if 'subcards_updates' in updated_data:
+        subcards_updates = json.loads(updated_data['subcards_updates'])
+        
+        for sub_upd in subcards_updates:
+            sub_id = int(sub_upd['subcard_id'])
+            
+            try:
+                subcard = SubCard.objects.get(id=sub_id)  # ← Проверь имя поля (sub_id или id)
+            except SubCard.DoesNotExist:
+                failed_subcards.append(sub_id)
+                continue
+            
+            # Обновляем координаты
+            if 'coords' in sub_upd:
+                subcard.coords = sub_upd['coords']
+                subcard.save(update_fields=['coords'])
+            
+            # Привязываем к этажу
+            if 'add_to_floorplan' in sub_upd and sub_upd['add_to_floorplan']:
+                floor_plan.subcard_ids.add(subcard)
+            
+            # Отвязываем от этажа
+            if 'remove_from_floorplan' in sub_upd and sub_upd['remove_from_floorplan']:
+                floor_plan.subcard_ids.remove(subcard)
+    
+    if serializer.is_valid():
+        serializer.save()
+    
+    resp_data = {
+        "success": True,
+        'message': "Этаж успешно обновлён"
+    }
+    
+    if failed_subcards:
+        resp_data.update({"warning": f"Эти субкарты не обнаружены: {failed_subcards}"})
+        
+    return Response(resp_data)
+
+
+
+// View.js
+window.EditorView = {
+    render() {
+        const svg = document.getElementById('drawing-svg');
+        svg.innerHTML = '';
+        
+        EditorModel.points.forEach(point => {
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', point.x);
+            circle.setAttribute('cy', point.y);
+            circle.setAttribute('r', 8);
+            
+            // Цвет по субкарте
+            if (point.subcardId) {
+                circle.setAttribute('fill', this.getSubcardColor(point.subcardId));
+                circle.setAttribute('stroke', '#ffffff');
+                circle.setAttribute('stroke-width', '2');
+                
+                // Тултип с названием субкарты
+                const subcard = EditorModel.getSubcard(point.subcardId);
+                if (subcard) {
+                    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+                    title.textContent = subcard.name;
+                    circle.appendChild(title);
+                }
+            } else {
+                // Непривязанные точки — серый цвет
+                circle.setAttribute('fill', '#cccccc');
+                circle.setAttribute('stroke', '#999999');
+            }
+            
+            circle.dataset.pointId = point.id;
+            circle.classList.add('base-point');
+            
+            svg.appendChild(circle);
+        });
+    },
+    
+    getSubcardColor(subcardId) {
+        // Генерируем цвет по ID (чтобы одинаковые субкарты всегда одного цвета)
+        const colors = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33'];
+        return colors[subcardId % colors.length];
+    }
+};
+
+
+Панель статуса
+<div id="subcard-status-panel">
+    <h4>Субкарты на этом этаже:</h4>
+    <ul id="linked-subcards-list">
+        <!-- Заполняется через JS -->
+    </ul>
+</div>
+// Controller.js
+updateSubcardStatusPanel() {
+    const list = document.getElementById('linked-subcards-list');
+    list.innerHTML = '';
+    
+    EditorModel.linkedSubcardIds.forEach(subcardId => {
+        const subcard = EditorModel.getSubcard(subcardId);
+        if (subcard) {
+            const li = document.createElement('li');
+            li.textContent = subcard.name;
+            li.style.color = EditorView.getSubcardColor(subcardId);
+            list.appendChild(li);
+        }
     });
 }
