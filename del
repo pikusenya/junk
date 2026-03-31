@@ -1,318 +1,110 @@
-<!-- Модальное окно привязки точки -->
-<div id="point-subcard-modal" class="modal hidden">
-    <div class="modal-content">
-        <h3>Привязать точку к субкарте</h3>
-        
-        <select id="subcard-select">
-            <option value="">-- Не привязано --</option>
-            <!-- Заполняется из всех субкарт объекта -->
-            {% for subcard in object.subcards.all %}
-            <option value="{{ subcard.id }}">{{ subcard.name }}</option>
-            {% endfor %}
-        </select>
-        
-        <div class="current-assignment">
-            <p>Текущая привязка: <span id="current-subcard-name">-</span></p>
-        </div>
-        
-        <button id="btn-save-point-assignment">Сохранить</button>
-        <button id="btn-close-point-modal">Отмена</button>
-    </div>
-</div>
-
-
-/ Controller.js
-window.EditorController = {
-    elements: {},
-    selectedPoint: null,
+// Controller.js
+async saveFloorPlan() {
+    const floorId = this.currentFloorId;
     
-    init() {
-        // ... существующие слушатели ...
-        
-        // Клик по точке → открываем модальное окно
-        document.getElementById('drawing-svg')
-            .addEventListener('click', (e) => {
-                if (e.target.classList.contains('base-point')) {
-                    const pointId = parseInt(e.target.dataset.pointId);
-                    this.openPointSubcardModal(pointId);
-                }
-            });
-        
-        // Сохранение привязки
-        document.getElementById('btn-save-point-assignment')
-            .addEventListener('click', () => this.savePointAssignment());
-        
-        // Закрытие модального окна
-        document.getElementById('btn-close-point-modal')
-            .addEventListener('click', () => this.closePointModal());
-    },
-    
-    async openPointSubcardModal(pointId) {
-        const point = EditorModel.getPoint(pointId);
-        this.selectedPoint = point;
-        
-        const { modal, select, currentName } = this.elements;
-        
-        // Заполняем селектор
-        this.populateSubcardSelect(point.subcardId);
-        
-        // Показываем текущую привязку
-        if (point.subcardId) {
-            const subcard = EditorModel.getSubcard(point.subcardId);
-            currentName.textContent = subcard ? subcard.name : 'Неизвестно';
-        } else {
-            currentName.textContent = 'Не привязано';
+    // === 1. Группируем точки по subcard_id ===
+    const pointsBySubcard = {};
+    EditorModel.points.forEach(point => {
+        const subcardId = point.id;  // По твоей логике: point.id = subcard_id
+        if (!pointsBySubcard[subcardId]) {
+            pointsBySubcard[subcardId] = [];
         }
-        
-        modal.classList.remove('hidden');
-    },
-    
-    populateSubcardSelect(selectedId) {
-        const { select } = this.elements;
-        select.innerHTML = '<option value="">-- Не привязано --</option>';
-        
-        EditorModel.subcards.forEach(subcard => {
-            const option = document.createElement('option');
-            option.value = subcard.id;
-            option.textContent = subcard.name;
-            if (subcard.id === selectedId) {
-                option.selected = true;
-            }
-            select.appendChild(option);
+        pointsBySubcard[subcardId].push({
+            id: point.id,
+            x: point.x,
+            y: point.y
         });
-    },
+    });
     
-    savePointAssignment() {
-        const { select } = this.elements;
-        const subcardId = select.value ? parseInt(select.value) : null;
-        
-        if (this.selectedPoint) {
-            // Обновляем subcardId у точки
-            this.selectedPoint.subcardId = subcardId;
-            
-            // Если у точки есть полигон — обновляем и его
-            if (this.selectedPoint.polygon) {
-                this.selectedPoint.polygon.subcardId = subcardId;
-            }
-            
-            // Перерисовываем (чтобы обновить цвет точки)
-            EditorView.render();
-            
-            this.closePointModal();
+    // === 2. Группируем полигоны по subcard_id ===
+    const polygonsBySubcard = {};
+    EditorModel.polygons.forEach(polygon => {
+        const subcardId = polygon.attachedTo;  // attachedTo = point.id = subcard_id
+        if (!polygonsBySubcard[subcardId]) {
+            polygonsBySubcard[subcardId] = [];
         }
-    },
+        polygonsBySubcard[subcardId].push({
+            attachedTo: polygon.attachedTo,
+            color: polygon.color,
+            vertices: polygon.vertices.map(v => ({
+                id: v.id,
+                x: v.x,
+                y: v.y
+            }))
+        });
+    });
     
-    closePointModal() {
-        this.elements.modal.classList.add('hidden');
-        this.selectedPoint = null;
-    },
+    // === 3. Собираем все уникальные subcard_id ===
+    const allSubcardIds = new Set([
+        ...Object.keys(pointsBySubcard).map(Number),
+        ...Object.keys(polygonsBySubcard).map(Number)
+    ]);
     
-    // --- СОХРАНЕНИЕ ВСЕХ ДАННЫХ ---
-    async saveFloorPlan() {
-        const floorId = this.currentFloorId;
+    // === 4. Формируем массив обновлений ===
+    const subcardsUpdates = [];
+    
+    // 4a. Субкарты с координатами → link_floorplan: true
+    allSubcardIds.forEach(subcardId => {
+        const coords = {
+            points: pointsBySubcard[subcardId] || [],
+            polygons: polygonsBySubcard[subcardId] || []
+        };
         
-        // Группируем точки по subcardId
-        const pointsBySubcard = this.groupPointsBySubcard();
-        
-        // Формируем обновления для каждой субкарты
-        const subcardsUpdates = Object.entries(pointsBySubcard).map(([subcardId, data]) => ({
-            subcard_id: parseInt(subcardId),
-            coords: {
-                points: data.points,
-                polygons: data.polygons
-            },
-            add_to_floorplan: true  // Если есть точки → привязываем субкарту к этажу
-        }));
-        
-        // Находим субкарты, которые были привязаны, но теперь без точек → отвязываем
-        const previouslyLinked = EditorModel.linkedSubcardIds;
-        const currentlyLinked = Object.keys(pointsBySubcard).map(id => parseInt(id));
-        
-        previouslyLinked.forEach(id => {
-            if (!currentlyLinked.includes(id)) {
+        subcardsUpdates.push({
+            subcard_id: subcardId,
+            coords: coords,
+            link_floorplan: true
+        });
+    });
+    
+    // 4b. Субкарты, которые были привязаны, но теперь без координат → link_floorplan: false
+    if (EditorModel.linkedSubcardIds) {
+        EditorModel.linkedSubcardIds.forEach(prevLinkedId => {
+            if (!allSubcardIds.has(prevLinkedId)) {
                 subcardsUpdates.push({
-                    subcard_id: id,
-                    remove_from_floorplan: true
+                    subcard_id: prevLinkedId,
+                    coords: {},          // Пустые координаты
+                    link_floorplan: false  // Отвязать от этажа
                 });
             }
         });
-        
-        const formData = new FormData();
-        formData.append('subcards_updates', JSON.stringify(subcardsUpdates));
-        
+    }
+    
+    // Если ничего не менялось — выходим
+    if (subcardsUpdates.length === 0) {
+        alert('Нет изменений для сохранения');
+        return;
+    }
+    
+    // === 5. Отправляем на сервер ===
+    try {
         const response = await fetch(`/api/floorplans/${floorId}/update/`, {
             method: 'PATCH',
-            body: formData,
             headers: {
+                'Content-Type': 'application/json',  // ← Важно: JSON, не FormData!
                 'X-CSRFToken': getCookie('csrftoken'),
                 'Accept': 'application/json'
-            }
+            },
+            body: JSON.stringify({
+                subcards_updates: subcardsUpdates
+            })
         });
         
         const result = await response.json();
         
         if (response.ok) {
-            alert('Данные сохранены!');
-            EditorModel.linkedSubcardIds = currentlyLinked;
+            // Обновляем linkedSubcardIds в модели
+            const newlyLinked = subcardsUpdates
+                .filter(u => u.link_floorplan)
+                .map(u => u.subcard_id);
+            EditorModel.linkedSubcardIds = newlyLinked;
+            
+            alert('✅ Данные сохранены!');
         } else {
-            alert('Ошибка: ' + result.error);
+            alert('❌ Ошибка: ' + (result.error || JSON.stringify(result)));
         }
-    },
-    
-    groupPointsBySubcard() {
-        const grouped = {};
-        
-        EditorModel.points.forEach(point => {
-            const subcardId = point.subcardId || 'unassigned';
-            
-            if (!grouped[subcardId]) {
-                grouped[subcardId] = { points: [], polygons: [] };
-            }
-            
-            // Добавляем точку (без subcardId, так как он уже в ключе)
-            grouped[subcardId].points.push({
-                id: point.id,
-                x: point.x,
-                y: point.y
-            });
-            
-            // Добавляем полигон если есть
-            if (point.polygon) {
-                grouped[subcardId].polygons.push({
-                    attachedTo: point.id,
-                    color: point.polygon.color,
-                    vertices: point.polygon.vertices.map(v => ({
-                        id: v.id,
-                        x: v.x,
-                        y: v.y
-                    }))
-                });
-            }
-        });
-        
-        // Убираем непривязанные точки (не отправляем на сервер)
-        delete grouped['unassigned'];
-        
-        return grouped;
+    } catch (error) {
+        console.error('Save error:', error);
+        alert('❌ Ошибка сети');
     }
-};
-
-
-# views.py
-@api_view(['PUT', 'PATCH'])
-def update_floorplan(request, floorplan_id):
-    floor_plan = get_object_or_404(FloorPlan, id=floorplan_id)
-    
-    updated_data = request.data
-    serializer = FloorPlanSerializer(floor_plan, data=updated_data, partial=True)
-    
-    failed_subcards = []
-    
-    if 'subcards_updates' in updated_data:
-        subcards_updates = json.loads(updated_data['subcards_updates'])
-        
-        for sub_upd in subcards_updates:
-            sub_id = int(sub_upd['subcard_id'])
-            
-            try:
-                subcard = SubCard.objects.get(id=sub_id)  # ← Проверь имя поля (sub_id или id)
-            except SubCard.DoesNotExist:
-                failed_subcards.append(sub_id)
-                continue
-            
-            # Обновляем координаты
-            if 'coords' in sub_upd:
-                subcard.coords = sub_upd['coords']
-                subcard.save(update_fields=['coords'])
-            
-            # Привязываем к этажу
-            if 'add_to_floorplan' in sub_upd and sub_upd['add_to_floorplan']:
-                floor_plan.subcard_ids.add(subcard)
-            
-            # Отвязываем от этажа
-            if 'remove_from_floorplan' in sub_upd and sub_upd['remove_from_floorplan']:
-                floor_plan.subcard_ids.remove(subcard)
-    
-    if serializer.is_valid():
-        serializer.save()
-    
-    resp_data = {
-        "success": True,
-        'message': "Этаж успешно обновлён"
-    }
-    
-    if failed_subcards:
-        resp_data.update({"warning": f"Эти субкарты не обнаружены: {failed_subcards}"})
-        
-    return Response(resp_data)
-
-
-
-// View.js
-window.EditorView = {
-    render() {
-        const svg = document.getElementById('drawing-svg');
-        svg.innerHTML = '';
-        
-        EditorModel.points.forEach(point => {
-            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-            circle.setAttribute('cx', point.x);
-            circle.setAttribute('cy', point.y);
-            circle.setAttribute('r', 8);
-            
-            // Цвет по субкарте
-            if (point.subcardId) {
-                circle.setAttribute('fill', this.getSubcardColor(point.subcardId));
-                circle.setAttribute('stroke', '#ffffff');
-                circle.setAttribute('stroke-width', '2');
-                
-                // Тултип с названием субкарты
-                const subcard = EditorModel.getSubcard(point.subcardId);
-                if (subcard) {
-                    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-                    title.textContent = subcard.name;
-                    circle.appendChild(title);
-                }
-            } else {
-                // Непривязанные точки — серый цвет
-                circle.setAttribute('fill', '#cccccc');
-                circle.setAttribute('stroke', '#999999');
-            }
-            
-            circle.dataset.pointId = point.id;
-            circle.classList.add('base-point');
-            
-            svg.appendChild(circle);
-        });
-    },
-    
-    getSubcardColor(subcardId) {
-        // Генерируем цвет по ID (чтобы одинаковые субкарты всегда одного цвета)
-        const colors = ['#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33'];
-        return colors[subcardId % colors.length];
-    }
-};
-
-
-Панель статуса
-<div id="subcard-status-panel">
-    <h4>Субкарты на этом этаже:</h4>
-    <ul id="linked-subcards-list">
-        <!-- Заполняется через JS -->
-    </ul>
-</div>
-// Controller.js
-updateSubcardStatusPanel() {
-    const list = document.getElementById('linked-subcards-list');
-    list.innerHTML = '';
-    
-    EditorModel.linkedSubcardIds.forEach(subcardId => {
-        const subcard = EditorModel.getSubcard(subcardId);
-        if (subcard) {
-            const li = document.createElement('li');
-            li.textContent = subcard.name;
-            li.style.color = EditorView.getSubcardColor(subcardId);
-            list.appendChild(li);
-        }
-    });
 }
