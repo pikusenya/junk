@@ -1,110 +1,221 @@
 // Controller.js
-async saveFloorPlan() {
-    const floorId = this.currentFloorId;
+window.FilterController = {
+    state: {
+        selectedRoom: null,
+        selectedTenant: null,
+        roomSearch: '',
+        tenantSearch: ''
+    },
     
-    // === 1. Группируем точки по subcard_id ===
-    const pointsBySubcard = {};
-    EditorModel.points.forEach(point => {
-        const subcardId = point.id;  // По твоей логике: point.id = subcard_id
-        if (!pointsBySubcard[subcardId]) {
-            pointsBySubcard[subcardId] = [];
-        }
-        pointsBySubcard[subcardId].push({
-            id: point.id,
-            x: point.x,
-            y: point.y
+    init() {
+        // Поиск по вводу
+        document.querySelectorAll('.filter-input').forEach(input => {
+            input.addEventListener('input', (e) => this.handleSearch(e));
         });
-    });
-    
-    // === 2. Группируем полигоны по subcard_id ===
-    const polygonsBySubcard = {};
-    EditorModel.polygons.forEach(polygon => {
-        const subcardId = polygon.attachedTo;  // attachedTo = point.id = subcard_id
-        if (!polygonsBySubcard[subcardId]) {
-            polygonsBySubcard[subcardId] = [];
-        }
-        polygonsBySubcard[subcardId].push({
-            attachedTo: polygon.attachedTo,
-            color: polygon.color,
-            vertices: polygon.vertices.map(v => ({
-                id: v.id,
-                x: v.x,
-                y: v.y
-            }))
-        });
-    });
-    
-    // === 3. Собираем все уникальные subcard_id ===
-    const allSubcardIds = new Set([
-        ...Object.keys(pointsBySubcard).map(Number),
-        ...Object.keys(polygonsBySubcard).map(Number)
-    ]);
-    
-    // === 4. Формируем массив обновлений ===
-    const subcardsUpdates = [];
-    
-    // 4a. Субкарты с координатами → link_floorplan: true
-    allSubcardIds.forEach(subcardId => {
-        const coords = {
-            points: pointsBySubcard[subcardId] || [],
-            polygons: polygonsBySubcard[subcardId] || []
-        };
         
-        subcardsUpdates.push({
-            subcard_id: subcardId,
-            coords: coords,
-            link_floorplan: true
+        // Клик по элементу списка
+        document.querySelectorAll('.items-list').forEach(list => {
+            list.addEventListener('click', (e) => this.handleItemClick(e));
         });
-    });
+        
+        // Кнопка сброса
+        document.querySelectorAll('.filter-reset').forEach(btn => {
+            btn.addEventListener('click', (e) => this.resetFilters(e));
+        });
+    },
     
-    // 4b. Субкарты, которые были привязаны, но теперь без координат → link_floorplan: false
-    if (EditorModel.linkedSubcardIds) {
-        EditorModel.linkedSubcardIds.forEach(prevLinkedId => {
-            if (!allSubcardIds.has(prevLinkedId)) {
-                subcardsUpdates.push({
-                    subcard_id: prevLinkedId,
-                    coords: {},          // Пустые координаты
-                    link_floorplan: false  // Отвязать от этажа
-                });
+    // === ОБРАБОТКА КЛИКА ПО ЭЛЕМЕНТУ ===
+    handleItemClick(e) {
+        const item = e.target.closest('.item');
+        if (!item) return;
+        
+        const list = item.closest('.items-list');
+        const type = list.dataset.type; // 'room' или 'tenant'
+        const id = parseInt(item.dataset.id);
+        
+        // Переключение выделения
+        if (this.state[`selected${this.capitalize(type)}`] === id) {
+            // Снимаем выделение
+            this.state[`selected${this.capitalize(type)}`] = null;
+            item.classList.remove('selected');
+        } else {
+            // Выделяем новый
+            list.querySelectorAll('.item.selected').forEach(i => i.classList.remove('selected'));
+            item.classList.add('selected');
+            this.state[`selected${this.capitalize(type)}`] = id;
+        }
+        
+        // Запускаем перекрёстную фильтрацию
+        this.applyCrossFilter();
+    },
+    
+    // === ПОИСК ПО ТЕКСТУ ===
+    handleSearch(e) {
+        const input = e.target;
+        const list = input.closest('.panel-section').querySelector('.items-list');
+        const type = list.dataset.type;
+        const query = input.value.toLowerCase().trim();
+        
+        this.state[`${type}Search`] = query;
+        this.updateResetButton(list);
+        this.applyTextFilter(list, query);
+        this.applyCrossFilter(); // Перекрёстный фильтр поверх текстового
+    },
+    
+    applyTextFilter(list, query) {
+        if (!query) {
+            list.querySelectorAll('.item').forEach(item => {
+                item.classList.remove('filtered-out');
+            });
+            return;
+        }
+        
+        list.querySelectorAll('.item').forEach(item => {
+            const name = item.dataset.name.toLowerCase();
+            const status = item.dataset.status.toLowerCase();
+            
+            // Ищем по имени ИЛИ по статусу
+            const matches = name.includes(query) || status.includes(query);
+            item.classList.toggle('filtered-out', !matches);
+        });
+    },
+    
+    // === ПЕРЕКРЁСТНАЯ ФИЛЬТРАЦИЯ ===
+    applyCrossFilter() {
+        const { selectedRoom, selectedTenant } = this.state;
+        
+        // Фильтруем помещения
+        const roomsList = document.getElementById('rooms-list');
+        roomsList.querySelectorAll('.item').forEach(item => {
+            if (item.classList.contains('filtered-out')) return; // Уже скрыт поиском
+            
+            // Если выбран арендатор — показываем только связанные помещения
+            if (selectedTenant) {
+                const roomTenantIds = item.dataset.tenantIds?.split(',').map(Number) || [];
+                const isVisible = roomTenantIds.includes(selectedTenant);
+                item.classList.toggle('cross-filtered', !isVisible);
+            } else {
+                item.classList.remove('cross-filtered');
             }
         });
-    }
-    
-    // Если ничего не менялось — выходим
-    if (subcardsUpdates.length === 0) {
-        alert('Нет изменений для сохранения');
-        return;
-    }
-    
-    // === 5. Отправляем на сервер ===
-    try {
-        const response = await fetch(`/api/floorplans/${floorId}/update/`, {
-            method: 'PATCH',
-            headers: {
-                'Content-Type': 'application/json',  // ← Важно: JSON, не FormData!
-                'X-CSRFToken': getCookie('csrftoken'),
-                'Accept': 'application/json'
-            },
-            body: JSON.stringify({
-                subcards_updates: subcardsUpdates
-            })
+        
+        // Фильтруем арендаторов
+        const tenantsList = document.getElementById('tenants-list');
+        tenantsList.querySelectorAll('.item').forEach(item => {
+            if (item.classList.contains('filtered-out')) return;
+            
+            // Если выбрано помещение — показываем только связанных арендаторов
+            if (selectedRoom) {
+                const tenantRoomIds = item.dataset.roomIds?.split(',').map(Number) || [];
+                const isVisible = tenantRoomIds.includes(selectedRoom);
+                item.classList.toggle('cross-filtered', !isVisible);
+            } else {
+                item.classList.remove('cross-filtered');
+            }
         });
         
-        const result = await response.json();
+        // Применяем комбинированную видимость
+        this.updateVisibility();
+    },
+    
+    updateVisibility() {
+        // Элемент виден, если не скрыт ни поиском, ни перекрёстным фильтром
+        document.querySelectorAll('.item').forEach(item => {
+            const isHiddenByText = item.classList.contains('filtered-out');
+            const isHiddenByCross = item.classList.contains('cross-filtered');
+            item.style.display = (isHiddenByText || isHiddenByCross) ? 'none' : '';
+        });
+    },
+    
+    // === СБРОС ФИЛЬТРОВ ===
+    resetFilters(e) {
+        const panel = e.target.closest('.panel-section');
+        const list = panel.querySelector('.items-list');
+        const type = list.dataset.type;
         
-        if (response.ok) {
-            // Обновляем linkedSubcardIds в модели
-            const newlyLinked = subcardsUpdates
-                .filter(u => u.link_floorplan)
-                .map(u => u.subcard_id);
-            EditorModel.linkedSubcardIds = newlyLinked;
-            
-            alert('✅ Данные сохранены!');
+        // Сбрасываем поиск
+        panel.querySelector('.filter-input').value = '';
+        this.state[`${type}Search`] = '';
+        
+        // Сбрасываем выделение
+        if (type === 'room') {
+            this.state.selectedRoom = null;
         } else {
-            alert('❌ Ошибка: ' + (result.error || JSON.stringify(result)));
+            this.state.selectedTenant = null;
         }
-    } catch (error) {
-        console.error('Save error:', error);
-        alert('❌ Ошибка сети');
+        
+        // Показываем все элементы
+        list.querySelectorAll('.item').forEach(item => {
+            item.classList.remove('filtered-out', 'cross-filtered', 'selected');
+            item.style.display = '';
+        });
+        
+        this.updateResetButton(list);
+    },
+    
+    updateResetButton(list) {
+        const panel = list.closest('.panel-section');
+        const btn = panel.querySelector('.filter-reset');
+        const input = panel.querySelector('.filter-input');
+        const hasActiveFilters = input.value.trim() || 
+                                 list.querySelector('.item.selected');
+        btn.classList.toggle('active', !!hasActiveFilters);
+    },
+    
+    capitalize(str) {
+        return str.charAt(0).toUpperCase() + str.slice(1);
     }
-}
+};
+
+// Инициализация
+document.addEventListener('DOMContentLoaded', () => {
+    FilterController.init();
+});
+
+
+
+// Model.js
+window.EditorModel = {
+    subcards: {}, // { id: { id, name, status, area, relatedTenantIds, ...} }
+    tenants: {},  // { id: { id, name, status, relatedRoomIds, ...} }
+    
+    // Загрузка данных с бэкенда
+    loadRelatedData(rooms, tenants) {
+        rooms.forEach(room => {
+            this.subcards[room.id] = {
+                ...room,
+                relatedTenantIds: room.tenant_ids || []
+            };
+        });
+        
+        tenants.forEach(tenant => {
+            this.tenants[tenant.id] = {
+                ...tenant,
+                relatedRoomIds: tenant.room_ids || []
+            };
+        });
+    },
+    
+    // Получить связанные арендаторы для помещения
+    getTenantsForRoom(roomId) {
+        const room = this.subcards[roomId];
+        if (!room) return [];
+        return room.relatedTenantIds.map(id => this.tenants[id]).filter(Boolean);
+    },
+    
+    // Получить связанные помещения для арендатора
+    getRoomsForTenant(tenantId) {
+        const tenant = this.tenants[tenantId];
+        if (!tenant) return [];
+        return tenant.relatedRoomIds.map(id => this.subcards[id]).filter(Boolean);
+    }
+};
+
+
+// В main.js после загрузки страницы
+fetch(`/api/related-data/${objectId}/`)
+    .then(r => r.json())
+    .then(data => {
+        EditorModel.loadRelatedData(data.rooms, data.tenants);
+        renderLists(data.rooms, data.tenants); // Твоя функция рендера <ul>
+    });
