@@ -1,26 +1,253 @@
-$('#my-select').select2({
-  matcher: function (params, data) {
-    // Если поле поиска пустое — показываем всё
-    if ($.trim(params.term) === '') {
-      return data;
+(() => {
+  const viewport = document.getElementById('map-viewport');
+  const canvas = document.getElementById('map-canvas');
+  const svg = document.getElementById('map-svg');
+
+  if (!viewport || !canvas || !svg) {
+    return;
+  }
+
+  const options = {
+    padding: 32,      // отступ от краёв viewport, px
+    minScale: 0.05,   // минимальный zoom
+    maxScale: 8,      // максимальный zoom
+  };
+
+  const state = {
+    x: 0,
+    y: 0,
+    scale: 1,
+  };
+
+  /**
+   * Синхронизируем размер canvas с системой координат SVG.
+   *
+   * Очень важно, чтобы координаты кругов из cx/cy
+   * и пиксели transform: translate/scale были в одной системе.
+   *
+   * Самый простой вариант: canvas имеет размер как viewBox.
+   */
+  function syncCanvasSize() {
+    const vb = svg.viewBox && svg.viewBox.baseVal;
+
+    let width = vb && vb.width ? vb.width : 0;
+    let height = vb && vb.height ? vb.height : 0;
+
+    const img = canvas.querySelector('img');
+
+    // Если viewBox не задан, можно оттолкнуться от реального размера картинки
+    if ((!width || !height) && img && img.naturalWidth && img.naturalHeight) {
+      width = img.naturalWidth;
+      height = img.naturalHeight;
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     }
 
-    if (!data.text) {
+    if (width && height) {
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+    }
+  }
+
+  /**
+   * Проверка, видим ли круг.
+   * Если ты скрываешь элементы через class="is-hidden" или display: none,
+   * этот метод их отфильтрует.
+   */
+  function isVisible(el) {
+    if (el.closest('.is-hidden, [hidden]')) {
+      return false;
+    }
+
+    const style = getComputedStyle(el);
+
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  /**
+   * Получаем bbox одного circle в координатах SVG.
+   */
+  function circleBBox(circle) {
+    const cx = parseFloat(circle.getAttribute('cx')) || 0;
+    const cy = parseFloat(circle.getAttribute('cy')) || 0;
+    let r = parseFloat(circle.getAttribute('r')) || 0;
+
+    // Если нужно учитывать толщину обводки
+    const strokeWidth = parseFloat(getComputedStyle(circle).strokeWidth) || 0;
+    r += strokeWidth / 2;
+
+    return {
+      x: cx - r,
+      y: cy - r,
+      width: r * 2,
+      height: r * 2,
+    };
+  }
+
+  /**
+   * Получаем общий bbox всех видимых кругов.
+   */
+  function getVisibleBBox() {
+    const circles = Array.from(svg.querySelectorAll('circle.map-circle'))
+      .filter(isVisible);
+
+    if (!circles.length) {
       return null;
     }
 
-    const term = params.term.toLowerCase();
-    const text = data.text.toLowerCase();
-    
-    // data.element — это оригинальный <option> из DOM
-    const email = (data.element.dataset.email || '').toLowerCase();
-    const phone = (data.element.dataset.phone || '').toLowerCase();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
 
-    // Проверяем совпадение хотя бы в одном поле
-    if (text.includes(term) || email.includes(term) || phone.includes(term)) {
-      return data;
+    for (const circle of circles) {
+      const box = circleBBox(circle);
+
+      minX = Math.min(minX, box.x);
+      minY = Math.min(minY, box.y);
+      maxX = Math.max(maxX, box.x + box.width);
+      maxY = Math.max(maxY, box.y + box.height);
     }
 
-    return null; // опция скрывается
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
   }
-});
+
+  function setTransform(x, y, scale, animate = true) {
+    state.x = x;
+    state.y = y;
+    state.scale = scale;
+
+    canvas.classList.toggle('is-animated', animate);
+
+    canvas.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+  }
+
+  /**
+   * Главная функция: подогнать масштаб под видимые круги.
+   */
+  function fitVisible(animate = true) {
+    syncCanvasSize();
+
+    const bbox = getVisibleBBox();
+
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+
+    if (!viewportWidth || !viewportHeight) {
+      return;
+    }
+
+    // Если видимых кругов нет, можно вернуть исходный масштаб
+    if (!bbox) {
+      setTransform(0, 0, 1, animate);
+      return;
+    }
+
+    // Защита от слишком маленького bbox
+    const bboxWidth = Math.max(bbox.width, 1);
+    const bboxHeight = Math.max(bbox.height, 1);
+
+    const availableWidth = Math.max(viewportWidth - options.padding * 2, 1);
+    const availableHeight = Math.max(viewportHeight - options.padding * 2, 1);
+
+    let scale = Math.min(
+      availableWidth / bboxWidth,
+      availableHeight / bboxHeight
+    );
+
+    // Ограничиваем минимальный и максимальный zoom
+    scale = Math.max(options.minScale, Math.min(options.maxScale, scale));
+
+    const bboxCenterX = bbox.x + bbox.width / 2;
+    const bboxCenterY = bbox.y + bbox.height / 2;
+
+    const viewportCenterX = viewportWidth / 2;
+    const viewportCenterY = viewportHeight / 2;
+
+    /**
+     * Формула для transform: translate(x, y) scale(s)
+     *
+     * screenX = x + scale * contentX
+     * screenY = y + scale * contentY
+     *
+     * Мы хотим, чтобы центр bbox оказался в центре viewport:
+     * x = viewportCenterX - scale * bboxCenterX
+     * y = viewportCenterY - scale * bboxCenterY
+     */
+    const x = viewportCenterX - scale * bboxCenterX;
+    const y = viewportCenterY - scale * bboxCenterY;
+
+    setTransform(x, y, scale, animate);
+  }
+
+  /**
+   * Пример клиентской фильтрации.
+   * У тебя фильтры могут быть другими — это не принципиально.
+   * Главное после скрытия/показа кругов вызвать fitVisible().
+   */
+  const filterInputs = document.querySelectorAll('input[data-map-filter]');
+
+  filterInputs.forEach(input => {
+    input.addEventListener('change', () => {
+      const checkedValues = Array.from(
+        document.querySelectorAll('input[data-map-filter]:checked')
+      ).map(el => el.value);
+
+      const circles = svg.querySelectorAll('circle.map-circle');
+
+      circles.forEach(circle => {
+        const category = circle.dataset.category;
+
+        const show =
+          checkedValues.length === 0 ||
+          checkedValues.includes(category);
+
+        circle.classList.toggle('is-hidden', !show);
+      });
+
+      fitVisible(true);
+    });
+  });
+
+  /**
+   * При ресайзе окна можно заново подгонять видимую область.
+   */
+  function debounce(fn, delay = 150) {
+    let timeoutId;
+
+    return (...args) => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => fn(...args), delay);
+    };
+  }
+
+  window.addEventListener('resize', debounce(() => {
+    fitVisible(false);
+  }));
+
+  /**
+   * Если у тебя есть ручной pan/drag,
+   * анимацию лучше отключать на время перетаскивания.
+   */
+  canvas.addEventListener('pointerdown', () => {
+    canvas.classList.remove('is-animated');
+  });
+
+  function init() {
+    syncCanvasSize();
+    fitVisible(false);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+
+  // Иногда удобно иметь доступ из консоли или другого кода
+  window.mapFitVisible = fitVisible;
+})();
