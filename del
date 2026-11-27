@@ -1,253 +1,684 @@
-(() => {
-  const viewport = document.getElementById('map-viewport');
-  const canvas = document.getElementById('map-canvas');
-  const svg = document.getElementById('map-svg');
+config.py
+BASE_URL = "https://portal.dom.gosuslugi.ru"
 
-  if (!viewport || !canvas || !svg) {
-    return;
-  }
+DEFAULT_HEADERS = {
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+    "Content-Type": "application/json",
+    "DNT": "1",
+    "Origin": "https://portal.dom.gosuslugi.ru",
+    "Referer": "https://portal.dom.gosuslugi.ru/",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+    "sec-ch-ua": '"Chromium";v="158", "Not.A/Brand";v="24", "Brave";v="158"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-gpc": "1",
+}
 
-  const options = {
-    padding: 32,      // отступ от краёв viewport, px
-    minScale: 0.05,   // минимальный zoom
-    maxScale: 8,      // максимальный zoom
-  };
+# Куки из твоего браузера.
+# httpx автоматически отправит их с первым запросом.
+DEFAULT_COOKIES = {
+    "suimSessionGuid": "33fd86c1-a9b5-4657-a0c3-ce74afb4d8c6",
+    "session-cookie": "18ebd8f1165e18c17c6c6bd9beb261f5af90474c526eb6a3f12b684b00ffda9c6568e68b54468d163b6c024084d0b11d",
+    "gis-auth-token": "eyJhbGciOiJub25lIn0.eyJqdGkiOiJhNjc3ZTdmOC05Mzk5LTRhMjItOTFiNS05MzY4ZTVmY2VkNTAifQ.",
+    "modalClosed": "true",
+    "totalTime": "300",
+}
 
-  const state = {
-    x: 0,
-    y: 0,
-    scale: 1,
-  };
+# Для гос. порталов лучше держать задержку побольше, чтобы не словить бан по IP
+REQUEST_DELAY = 1.5
+MAX_RETRIES = 3
 
-  /**
-   * Синхронизируем размер canvas с системой координат SVG.
-   *
-   * Очень важно, чтобы координаты кругов из cx/cy
-   * и пиксели transform: translate/scale были в одной системе.
-   *
-   * Самый простой вариант: canvas имеет размер как viewBox.
-   */
-  function syncCanvasSize() {
-    const vb = svg.viewBox && svg.viewBox.baseVal;
+client.py
+import httpx
+import time
+from loguru import logger
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from parser.config import BASE_URL, DEFAULT_HEADERS, DEFAULT_COOKIES, REQUEST_DELAY, MAX_RETRIES
 
-    let width = vb && vb.width ? vb.width : 0;
-    let height = vb && vb.height ? vb.height : 0;
 
-    const img = canvas.querySelector('img');
+class GisZhkhClient:
+    def __init__(self):
+        self.client = httpx.Client(
+            base_url=BASE_URL,
+            headers=DEFAULT_HEADERS,
+            cookies=DEFAULT_COOKIES,
+            timeout=30.0,
+            follow_redirects=True
+        )
+        self._last_request_time = 0
 
-    // Если viewBox не задан, можно оттолкнуться от реального размера картинки
-    if ((!width || !height) && img && img.naturalWidth && img.naturalHeight) {
-      width = img.naturalWidth;
-      height = img.naturalHeight;
-      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    }
+    def _throttle(self):
+        elapsed = time.time() - self._last_request_time
+        if elapsed < REQUEST_DELAY:
+            time.sleep(REQUEST_DELAY - elapsed)
+        self._last_request_time = time.time()
 
-    if (width && height) {
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-    }
-  }
+    @retry(
+        stop=stop_after_attempt(MAX_RETRIES),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+        reraise=True
+    )
+    def request(self, method: str, url: str, headers: dict = None, **kwargs) -> dict:
+        self._throttle()
+        final_headers = DEFAULT_HEADERS.copy()
+        if headers:
+            final_headers.update(headers)
 
-  /**
-   * Проверка, видим ли круг.
-   * Если ты скрываешь элементы через class="is-hidden" или display: none,
-   * этот метод их отфильтрует.
-   */
-  function isVisible(el) {
-    if (el.closest('.is-hidden, [hidden]')) {
-      return false;
-    }
+        logger.debug(f"Отправка {method} запроса к: {url}")
+        response = self.client.request(method, url, headers=final_headers, **kwargs)
+        response.raise_for_status()
+        return response.json()
 
-    const style = getComputedStyle(el);
+    def get_html(self, url: str) -> str:
+        """Получает сырой HTML-код страницы с правильными заголовками для Next.js"""
+        self._throttle()
+        html_headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+            "Cache-Control": "max-age=0",
+            "DNT": "1",
+            "Referer": "https://portal.dom.gosuslugi.ru/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            "sec-ch-ua": '"Chromium";v="158", "Not.A/Brand";v="24", "Brave";v="158"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-gpc": "1"
+        }
+        logger.debug(f"Запрос HTML страницы: {url}")
+        response = self.client.get(url, headers=html_headers)
+        response.raise_for_status()
+        return response.text
 
-    return style.display !== 'none' && style.visibility !== 'hidden';
-  }
+    def close(self):
+        self.client.close()
 
-  /**
-   * Получаем bbox одного circle в координатах SVG.
-   */
-  function circleBBox(circle) {
-    const cx = parseFloat(circle.getAttribute('cx')) || 0;
-    const cy = parseFloat(circle.getAttribute('cy')) || 0;
-    let r = parseFloat(circle.getAttribute('r')) || 0;
+endpoints.py
+import re
+import json
+import uuid
+from loguru import logger
+from typing import List, Optional
+from bs4 import BeautifulSoup
+from parser.client import GisZhkhClient
+from parser.models import HouseResult, ManagementCompany, UtilityProvider
+from typing import Optional, Dict
 
-    // Если нужно учитывать толщину обводки
-    const strokeWidth = parseFloat(getComputedStyle(circle).strokeWidth) || 0;
-    r += strokeWidth / 2;
+class GisAdminAPI:
+    def __init__(self, client: GisZhkhClient):
+        self.client = client
+        # Словари для кэширования: ключ = ID организации, значение = объект данных
+        self.uk_cache: Dict[str, ManagementCompany] = {}
+        self.provider_cache: Dict[str, UtilityProvider] = {}
 
-    return {
-      x: cx - r,
-      y: cy - r,
-      width: r * 2,
-      height: r * 2,
-    };
-  }
+    def search_house_by_address(self, address: str) -> HouseResult:
+        """
+        Шаг 1: Поиск дома через Suggest API.
+        """
+        logger.info(f"Ищу дом по адресу (suggest): {address}")
 
-  /**
-   * Получаем общий bbox всех видимых кругов.
-   */
-  function getVisibleBBox() {
-    const circles = Array.from(svg.querySelectorAll('circle.map-circle'))
-      .filter(isVisible);
+        payload = {
+            "appName": "ГИС ЖКХ",
+            "reqId": "ГИС ЖКХ",
+            "rmFedCities": True,
+            "woFlat": True,
+            "addr": address
+        }
 
-    if (!circles.length) {
-      return null;
-    }
+        try:
+            response_json = self.client.request("POST", "/gispa/suggest/api/v4_6", json=payload)
 
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
+            house_result = HouseResult(
+                address=address,
+                raw_suggest_response=response_json
+            )
 
-    for (const circle of circles) {
-      const box = circleBBox(circle);
+            # Парсим массив найденных адресов
+            addr_list = response_json.get("addr", [])
+            house_result.found_addresses_count = len(addr_list)
 
-      minX = Math.min(minX, box.x);
-      minY = Math.min(minY, box.y);
-      maxX = Math.max(maxX, box.x + box.width);
-      maxY = Math.max(maxY, box.y + box.height);
-    }
+            if not addr_list:
+                logger.warning(f"По адресу '{address}' не найдено ни одного совпадения")
+                house_result.error = "Адрес не найден"
+                return house_result
 
-    return {
-      x: minX,
-      y: minY,
-      width: maxX - minX,
-      height: maxY - minY,
-    };
-  }
+            # Сохраняем все найденные адреса
+            house_result.all_found_addresses = [
+                item.get("outAddr", "Неизвестный адрес") for item in addr_list
+            ]
 
-  function setTransform(x, y, scale, animate = true) {
-    state.x = x;
-    state.y = y;
-    state.scale = scale;
+            # Выбираем первый адрес (addr[0])
+            selected_addr = addr_list[0]
+            house_result.selected_address_formatted = selected_addr.get("outAddr")
 
-    canvas.classList.toggle('is-animated', animate);
+            # Извлекаем GUID из элементов
+            # ВАЖНО: Если структура изменится, проверь логику поиска элементов здесь
+            elements = selected_addr.get("elements", [])
 
-    canvas.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
-  }
+            region_fias_id = None
+            house_fias_id = None
 
-  /**
-   * Главная функция: подогнать масштаб под видимые круги.
-   */
-  function fitVisible(animate = true) {
-    syncCanvasSize();
+            for element in elements:
+                level = element.get("level")
+                guid = element.get("guid")
 
-    const bbox = getVisibleBBox();
+                if level == 1:  # Регион (область/край/республика)
+                    region_fias_id = guid
+                    logger.debug(f"Найден регион: {element.get('val')} (GUID: {guid})")
+                elif level == 8:  # Дом
+                    house_fias_id = guid
+                    logger.debug(f"Найден дом: {element.get('val')} (GUID: {guid})")
 
-    const viewportWidth = viewport.clientWidth;
-    const viewportHeight = viewport.clientHeight;
+            # Проверяем, что нашли оба ID
+            if not region_fias_id or not house_fias_id:
+                error_msg = f"Не удалось извлечь region_fias_id или house_fias_id. Найдено: region={region_fias_id}, house={house_fias_id}"
+                logger.error(error_msg)
+                house_result.error = error_msg
+                return house_result
 
-    if (!viewportWidth || !viewportHeight) {
-      return;
-    }
+            # Теперь делаем запрос на получение house_id
+            house_id = self._get_house_id(region_fias_id, house_fias_id)
+            house_result.house_id = house_id
 
-    // Если видимых кругов нет, можно вернуть исходный масштаб
-    if (!bbox) {
-      setTransform(0, 0, 1, animate);
-      return;
-    }
+            if not house_id:
+                house_result.error = "Не удалось получить house_id из API"
 
-    // Защита от слишком маленького bbox
-    const bboxWidth = Math.max(bbox.width, 1);
-    const bboxHeight = Math.max(bbox.height, 1);
+            return house_result
 
-    const availableWidth = Math.max(viewportWidth - options.padding * 2, 1);
-    const availableHeight = Math.max(viewportHeight - options.padding * 2, 1);
+        except Exception as e:
+            logger.error(f"Ошибка при поиске адреса {address}: {e}")
+            return HouseResult(address=address, error=str(e))
 
-    let scale = Math.min(
-      availableWidth / bboxWidth,
-      availableHeight / bboxHeight
-    );
+    def _get_house_id(self, region_fias_id: str, house_fias_id: str) -> Optional[str]:
+        """
+        Шаг 2: Получение house_id через searchController.houseSearch.
+        """
+        logger.info(f"Получаю house_id для region={region_fias_id}, house={house_fias_id}")
 
-    // Ограничиваем минимальный и максимальный zoom
-    scale = Math.max(options.minScale, Math.min(options.maxScale, scale));
+        payload = {
+            "id": 1,
+            "method": "searchController.houseSearch",
+            "params": {
+                "region_fias_id": region_fias_id,
+                "house_fias_id": house_fias_id
+            },
+            "jsonrpc": "2.0"
+        }
 
-    const bboxCenterX = bbox.x + bbox.width / 2;
-    const bboxCenterY = bbox.y + bbox.height / 2;
+        # Генерируем уникальные GUID для заголовков
+        request_guid = str(uuid.uuid4())
+        session_guid = "33fd86c1-a9b5-4657-a0c3-ce74afb4d8c6"  # Из твоего браузера
 
-    const viewportCenterX = viewportWidth / 2;
-    const viewportCenterY = viewportHeight / 2;
+        # Добавляем специфичные заголовки для этого запроса
+        headers = {
+            "Request-Guid": request_guid,
+            "Session-Guid": session_guid
+        }
 
-    /**
-     * Формула для transform: translate(x, y) scale(s)
-     *
-     * screenX = x + scale * contentX
-     * screenY = y + scale * contentY
-     *
-     * Мы хотим, чтобы центр bbox оказался в центре viewport:
-     * x = viewportCenterX - scale * bboxCenterX
-     * y = viewportCenterY - scale * bboxCenterY
-     */
-    const x = viewportCenterX - scale * bboxCenterX;
-    const y = viewportCenterY - scale * bboxCenterY;
+        try:
+            response_json = self.client.request("POST", "/api", json=payload, headers=headers)
 
-    setTransform(x, y, scale, animate);
-  }
+            # Извлекаем house_id из ответа
+            # Структура: {"id": 1, "result": {"id": "house_id"}, "jsonrpc": "2.0"}
+            result = response_json.get("result", {})
+            house_id = result.get("id")
 
-  /**
-   * Пример клиентской фильтрации.
-   * У тебя фильтры могут быть другими — это не принципиально.
-   * Главное после скрытия/показа кругов вызвать fitVisible().
-   */
-  const filterInputs = document.querySelectorAll('input[data-map-filter]');
+            if not house_id:
+                logger.error(f"В ответе отсутствует result.id. Ответ: {response_json}")
+                return None
 
-  filterInputs.forEach(input => {
-    input.addEventListener('change', () => {
-      const checkedValues = Array.from(
-        document.querySelectorAll('input[data-map-filter]:checked')
-      ).map(el => el.value);
+            logger.info(f"Успешно получен house_id: {house_id}")
+            return house_id
 
-      const circles = svg.querySelectorAll('circle.map-circle');
+        except Exception as e:
+            logger.error(f"Ошибка при получении house_id: {e}")
+            return None
 
-      circles.forEach(circle => {
-        const category = circle.dataset.category;
+    def get_house_details(self, house_result: HouseResult) -> HouseResult:
+        """
+        Шаг 3: Получение ID организаций из __NEXT_DATA__ и запрос их деталей через API.
+        """
+        if not house_result.house_id:
+            logger.warning(f"Нет house_id для получения деталей дома {house_result.address}")
+            return house_result
 
-        const show =
-          checkedValues.length === 0 ||
-          checkedValues.includes(category);
+        logger.info(f"Парсинг страницы дома ID: {house_result.house_id}")
+        house_url = f"/home/{house_result.house_id}"
 
-        circle.classList.toggle('is-hidden', !show);
-      });
+        try:
+            html_content = self.client.get_html(house_url)
+            match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_content)
+            if not match:
+                logger.error(f"Не удалось найти __NEXT_DATA__ на странице дома {house_result.house_id}")
+                house_result.error = "Не найдены данные страницы (Next.js data)"
+                return house_result
 
-      fitVisible(true);
-    });
-  });
+            next_data = json.loads(match.group(1))
+            house_data = next_data.get("props", {}).get("pageProps", {}).get("result", {}).get("house", {})
 
-  /**
-   * При ресайзе окна можно заново подгонять видимую область.
-   */
-  function debounce(fn, delay = 150) {
-    let timeoutId;
+            if not house_data:
+                house_result.error = "Не найдены данные дома в Next.js"
+                return house_result
 
-    return (...args) => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => fn(...args), delay);
-    };
-  }
+            # 2. Получаем Управляющую Организацию (с кэшем)
+            mgmt_org = house_data.get("managementOrganization")
+            if mgmt_org and mgmt_org.get("id"):
+                house_result.uo = self._get_management_org_details(mgmt_org["id"])
 
-  window.addEventListener('resize', debounce(() => {
-    fitVisible(false);
-  }));
+            # 2. Получаем маппинг "ID организации -> Название услуги"
+            service_map = self._get_utility_services_map(house_data)
 
-  /**
-   * Если у тебя есть ручной pan/drag,
-   * анимацию лучше отключать на время перетаскивания.
-   */
-  canvas.addEventListener('pointerdown', () => {
-    canvas.classList.remove('is-animated');
-  });
+            # 3. Собираем список всех поставщиков для обработки
+            providers_to_process = []
+            for rso in house_data.get("resourceProvisionOrganizationList", []):
+                if rso.get("id"):
+                    providers_to_process.append({"id": rso["id"], "type": "RSO", "name": rso.get("shortName", "")})
 
-  function init() {
-    syncCanvasSize();
-    fitVisible(false);
-  }
+            tko_org = house_data.get("tkoOrganization")
+            if tko_org and tko_org.get("id"):
+                providers_to_process.append({"id": tko_org["id"], "type": "TKO", "name": tko_org.get("shortName", "")})
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
+            # 4. Парсим HTML каждого поставщика (с кэшем)
+            for prov in providers_to_process:
+                service_name = service_map.get(prov["id"], "Коммунальная услуга")
 
-  // Иногда удобно иметь доступ из консоли или другого кода
-  window.mapFitVisible = fitVisible;
-})();
+                provider_details = self._get_provider_details_from_html(
+                    provider_id=prov["id"],
+                    house_id=house_result.house_id,
+                    provider_type=prov["type"],
+                    service_type=service_name,
+                    default_name=prov["name"]
+                )
+
+                if provider_details:
+                    house_result.providers.append(provider_details)
+
+            logger.info(f"✅ Дом {house_result.house_id} обработан. УК: {house_result.uo.name if house_result.uo else 'Нет'}, Поставщиков: {len(house_result.providers)}")
+            return house_result
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении деталей дома {house_result.house_id}: {e}")
+            house_result.error = str(e)
+            return house_result
+
+    def _get_utility_services_map(self, house_data: dict) -> dict:
+        """
+        Делает запрос к houseController.getHouseUtilityProviders и возвращает словарь:
+        { "provider_id": "Название услуги", ... }
+        """
+        logger.debug("Запрос списка услуг и поставщиков через API...")
+        payload = {
+            "id": 1,
+            "method": "houseController.getHouseUtilityProviders",
+            "params": {
+                "managementOrganization": house_data.get("managementOrganization"),
+                "fiasHouseCode": house_data.get("fiasHouseCode"),
+                "tkoOrganization": house_data.get("tkoOrganization"),
+                "resourceProvisionOrganizationList": house_data.get("resourceProvisionOrganizationList", [])
+            },
+            "jsonrpc": "2.0"
+        }
+        headers = {"Request-Guid": str(uuid.uuid4()), "Session-Guid": "33fd86c1-a9b5-4657-a0c3-ce74afb4d8c6"}
+
+        service_map = {}
+        try:
+            response = self.client.request("POST", "/api", json=payload, headers=headers)
+            utility_list = response.get("result", {}).get("utilityProviderOrganizations", [])
+
+            for item in utility_list:
+                service_name = item.get("utility", {}).get("name", "Неизвестная услуга")
+                for org in item.get("organizations", []):
+                    org_id = org.get("id")
+                    if org_id:
+                        # Если организация предоставляет несколько услуг, объединяем их через запятую
+                        if org_id in service_map:
+                            if service_name not in service_map[org_id]:
+                                service_map[org_id] += f", {service_name}"
+                        else:
+                            service_map[org_id] = service_name
+
+            logger.debug(f"Построена карта услуг для {len(service_map)} организаций.")
+
+        except Exception as e:
+            logger.warning(f"Не удалось получить карту услуг через API, будем использовать заглушку: {e}")
+
+        return service_map
+
+    def _get_management_org_details(self, org_id: str) -> Optional[ManagementCompany]:
+        # ПРОВЕРКА КЭША
+        if org_id in self.uk_cache:
+            logger.debug(f"УК {org_id} взята из кэша")
+            return self.uk_cache[org_id]
+
+        logger.debug(f"Запрос деталей новой УК по ID: {org_id}")
+        payload = {
+            "id": 1,
+            "method": "houseController.getHouseManagementOrganization",
+            "params": {"id": org_id},
+            "jsonrpc": "2.0"
+        }
+        headers = {
+            "Request-Guid": str(uuid.uuid4()),
+            "Session-Guid": "33fd86c1-a9b5-4657-a0c3-ce74afb4d8c6" # Берем из твоих cookies
+        }
+
+        try:
+            response = self.client.request("POST", "/api", json=payload, headers=headers)
+            result = response.get("result", {}).get("managementOrganization", {})
+
+            contacts = result.get("contacts", {})
+
+            uk_data = ManagementCompany(
+                name=result.get("shortName", ""),
+                url=contacts.get("urls", [{}])[0].get("value", "") or result.get("url", ""),
+                phone=contacts.get("phones", [{}])[0].get("value", ""),
+                email=contacts.get("emails", [{}])[0].get("value", ""),
+                inn=result.get("inn", ""), ogrn=result.get("ogrn", ""), kpp=result.get("kpp", ""),
+                address=result.get("orgAddress", "")
+            )
+
+            # СОХРАНЕНИЕ В КЭШ
+            self.uk_cache[org_id] = uk_data
+            return uk_data
+
+        except Exception as e:
+            logger.error(f"Не удалось получить детали УК {org_id}: {e}")
+            return None
+
+    def _get_provider_details_from_html(self, provider_id: str, house_id: str, provider_type: str, service_type: str, default_name: str) -> Optional[UtilityProvider]:
+        # ПРОВЕРКА КЭША
+        if provider_id in self.provider_cache:
+            logger.debug(f"Поставщик {provider_id} взят из кэша")
+            # Возвращаем копию, чтобы не менять данные в кэше, если вдруг потребуется
+            cached_prov = self.provider_cache[provider_id]
+            # Обновляем только service_type, так как одна компания может оказывать разные услуги в разных домах
+            cached_prov.service_type = service_type
+            return cached_prov
+
+        logger.debug(f"Парсинг страницы нового поставщика {provider_type} ({service_type}): {default_name}")
+        url = f"/{provider_type.lower()}/{provider_id}/{house_id}"
+
+        try:
+            html_content = self.client.get_html(url)
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # Ищем заголовок h3 с текстом "Основные реквизиты"
+            h3_tag = soup.find('h3', string=lambda t: t and 'Основные реквизиты' in t)
+            if not h3_tag:
+                prov_data = UtilityProvider(provider_id=provider_id, provider_type=provider_type, service_type=service_type, company_name=default_name)
+                self.provider_cache[provider_id] = prov_data
+                return prov_data
+
+            parent_div = h3_tag.find_parent('div')
+            if not parent_div:
+                prov_data = UtilityProvider(provider_id=provider_id, provider_type=provider_type, service_type=service_type, company_name=default_name)
+                self.provider_cache[provider_id] = prov_data
+                return prov_data
+
+            # --- ПАРСИНГ ДАННЫХ ---
+            name_tag = parent_div.find('h5')
+            company_name = name_tag.get_text(strip=True) if name_tag else default_name
+
+            # ИНН, ОГРН, КПП
+            inn = ogrn = kpp = ""
+            for label in ["ИНН", "ОГРН", "КПП"]:
+                # Ищем span с текстом метки
+                span = parent_div.find('span', string=lambda t: t and label in t)
+                if span and span.parent:
+                    val = span.parent.get_text(strip=True).replace(label, "").strip()
+                    if label == "ИНН": inn = val
+                    elif label == "ОГРН": ogrn = val
+                    elif label == "КПП": kpp = val
+
+            # Адрес (ищем текст "Фактический адрес" и берем следующий div)
+            address = ""
+            factual_label = parent_div.find(string=lambda t: t and "Фактический адрес" in t)
+            if factual_label:
+                next_div = factual_label.find_next('div')
+                if next_div: address = next_div.get_text(strip=True)
+
+            # Email (ищем ссылку с href="mailto:...")
+            email = ""
+            email_a = parent_div.find('a', href=lambda h: h and h.startswith('mailto:'))
+            if email_a: email = email_a['href'].replace('mailto:', '').strip() or email_a.get_text(strip=True)
+
+            # Телефон (ищем ссылку с href="tel:...")
+            phone = ""
+            phone_a = parent_div.find('a', href=lambda h: h and h.startswith('tel:'))
+            if phone_a:
+                # Внутри ссылки может быть div с номером и span с подписью "Аварийная служба"
+                # Берем текст первого div, чтобы получить чистый номер
+                phone_div = phone_a.find('div')
+                phone = phone_div.get_text(strip=True) if phone_div else phone_a['href'].replace('tel:', '').strip()
+
+            # Сайт (ищем любую ссылку, которая НЕ mailto и НЕ tel)
+            website = ""
+            for a_tag in parent_div.find_all('a'):
+                href = a_tag.get('href', '')
+                if href and not href.startswith('mailto:') and not href.startswith('tel:') and not href.startswith('#'):
+                    website = href
+                    break
+            # --- КОНЕЦ ПАРСИНГА ---
+
+            prov_data = UtilityProvider(
+                provider_id=provider_id, provider_type=provider_type, service_type=service_type,
+                company_name=company_name, email=email, phone=phone, url=website,
+                inn=inn, ogrn=ogrn, kpp=kpp, address=address
+            )
+
+            # СОХРАНЕНИЕ В КЭШ
+            self.provider_cache[provider_id] = prov_data
+            logger.info(f"✅ Распарсен и сохранен в кэш: {company_name} | Услуга: {service_type} | Email: {email or 'НЕТ'}")
+            return prov_data
+
+        except Exception as e:
+            logger.error(f"Ошибка при парсинге страницы поставщика {default_name}: {e}")
+            return None
+
+models.py
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+@dataclass
+class ManagementCompany:
+    name: str = ""
+    url: str = ""
+    phone: str = ""
+    email: str = ""
+    inn: str = ""
+    ogrn: str = ""
+    kpp: str = ""
+    address: str = ""
+
+@dataclass
+class UtilityProvider:
+    provider_id: str = ""
+    provider_type: str = ""      # "RSO" или "TKO" или "UO"
+    service_type: str = ""       # Вид услуги (например, "Холодное водоснабжение")
+    company_name: str = ""
+    email: str = ""              # Обязательно
+    phone: str = ""
+    url: str = ""
+    inn: str = ""
+    ogrn: str = ""
+    kpp: str = ""
+    address: str = ""
+
+@dataclass
+class HouseResult:
+    address: str
+    house_id: Optional[str] = None
+
+    # Информация из suggest API
+    found_addresses_count: int = 0
+    all_found_addresses: List[str] = field(default_factory=list)
+    selected_address_formatted: Optional[str] = None
+
+    # Контактная информация
+    uo: Optional[ManagementCompany] = None
+    providers: List[UtilityProvider] = field(default_factory=list)
+
+    # Для отладки (обязательно оставляем, чтобы не ломалось)
+    error: Optional[str] = None
+    raw_search_response: Optional[dict] = None
+    raw_suggest_response: Optional[dict] = None
+
+
+main.py
+import pandas as pd
+from loguru import logger
+from dataclasses import asdict
+from parser.client import GisZhkhClient
+from parser.endpoints import GisAdminAPI
+
+def format_found_addresses(found_addresses: list, selected_address: str) -> str:
+    """
+    Форматирует список найденных адресов для удобного отображения в Excel.
+    Выбранный адрес помечается как '(выбран)'.
+    """
+    if not found_addresses: return ""
+    formatted = [f"{addr} (ВЫБРАН)" if addr == selected_address else addr for addr in found_addresses]
+    return " | ".join(formatted)
+
+
+def run_parser(input_file: str, output_file: str):
+    logger.add("parser_debug.log", rotation="10 MB", compression="zip", level="DEBUG")
+    logger.info("Запуск парсера ГИС ЖКХ с кэшированием...")
+
+    try:
+        df_input = pd.read_excel(input_file)
+    except FileNotFoundError:
+        logger.error(
+            f"Файл {input_file} не найден. Создай его и добавь колонку 'address'."
+        )
+        return
+
+    client = GisZhkhClient()
+    api = GisAdminAPI(client)
+
+    results = []
+
+    for index, row in df_input.iterrows():
+        address = row['address']
+        logger.info(f"Обработка {index + 1}/{len(df_input)}: {address}")
+
+        try:
+            # 1. Ищем дом через suggest API
+            house_data = api.search_house_by_address(address)
+
+            if house_data.house_id:
+                # 2. Получаем детали (УО и Поставщики)
+                house_data = api.get_house_details(house_data)
+
+            logger.info(f"Адрес '{address}': найдено вариантов: {house_data.found_addresses_count}")
+            results.append(house_data)
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка при обработке адреса {address}: {e}")
+            results.append(house_data) # Добавляем с ошибкой, чтобы не терять строку
+
+    client.close()
+    logger.info("Парсинг завершен. Формирование Excel-отчета...")
+
+    # ==========================================
+    # ЛИСТ 1: Основной результат
+    # ==========================================
+    main_rows = []
+    # Находим максимальное количество поставщиков у одного дома, чтобы создать нужное число колонок
+    max_providers = max((len(res.providers) for res in results), default=0)
+
+    for res in results:
+        row = {
+            "Адрес": res.address,
+            "Найдено адресов": res.found_addresses_count,
+            "Варианты адресов": format_found_addresses(res.all_found_addresses, res.selected_address_formatted),
+            "УК Название": res.uo.name if res.uo else "",
+            "УК Почта": res.uo.email if res.uo else "",
+            "Ошибка": res.error or ""
+        }
+        # Динамически добавляем колонки для каждого поставщика
+        for i, prov in enumerate(res.providers, 1):
+            row[f"Услуга_{i}"] = prov.service_type
+            row[f"Компания_{i}"] = prov.company_name
+            row[f"Почта_{i}"] = prov.email
+
+        main_rows.append(row)
+
+    df_main = pd.DataFrame(main_rows)
+
+    # ==========================================
+    # ЛИСТ 2: Реестр УК (из кэша)
+    # ==========================================
+    uk_registry = [asdict(uk) for uk in api.uk_cache.values()]
+    df_uk = pd.DataFrame(uk_registry)
+
+    # ==========================================
+    # ЛИСТ 3: Реестр ЖКХ/Поставщиков (из кэша)
+    # ==========================================
+    provider_registry = [asdict(prov) for prov in api.provider_cache.values()]
+    df_provider = pd.DataFrame(provider_registry)
+
+    # ==========================================
+    # ЛИСТ 4: Дебаг (упрощенный)
+    # ==========================================
+    # Исключаем огромные raw-словари, чтобы файл не весил гигабайты
+    debug_rows = []
+    for res in results:
+        d = asdict(res)
+        d.pop('raw_suggest_response', None)
+        debug_rows.append(d)
+    df_debug = pd.json_normalize(debug_rows)
+
+    # ==========================================
+    # ЗАПИСЬ В EXCEL
+    # ==========================================
+    try:
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            df_main.to_excel(writer, sheet_name='Основной_результат', index=False)
+            df_uk.to_excel(writer, sheet_name='Реестр_УК', index=False)
+            df_provider.to_excel(writer, sheet_name='Реестр_Поставщиков', index=False)
+            df_debug.to_excel(writer, sheet_name='Debug', index=False)
+
+        logger.success(f"✅ Отчет успешно сохранен в {output_file}")
+        logger.info(f"Статистика: Обработано домов: {len(results)}, Уникальных УК: {len(api.uk_cache)}, Уникальных поставщиков: {len(api.provider_cache)}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении Excel файла: {e}")
+        logger.info("Попробуйте закрыть файл output_contacts.xlsx, если он открыт в Excel, и запустить скрипт снова.")
+
+
+if __name__ == "__main__":
+    run_parser("input_addresses.xlsx", "output_contacts.xlsx")
+
+requirements
+anyio==4.16.0
+beautifulsoup4==4.15.0
+certifi==2026.11.20
+chardet==4.0.0
+colorama==0.4.6
+et-xmlfile==2.0.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.29.0
+idna==2.10
+loguru==0.8.0
+numpy==2.5.5
+openpyxl==3.1.5
+pandas==3.1.1
+python-dateutil==4.0.0
+requests==2.25.1
+soupsieve==4.1.3
+tenacity==9.2.1
+typing-extensions==4.16.0
+tzdata==2026.6
+urllib3==1.26.20
+win32-setctime==1.2.1
